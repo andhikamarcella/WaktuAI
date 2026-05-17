@@ -10,6 +10,8 @@ interface PoseModel {
   dispose?: () => void;
 }
 
+type CameraFacingMode = "environment" | "user";
+
 interface PoseDetectionModule {
   createDetector: (model: unknown, config?: unknown) => Promise<PoseModel>;
   SupportedModels: { MoveNet: unknown };
@@ -24,9 +26,9 @@ interface TensorFlowCoreModule {
 
 function loadPoseModules(): Promise<[PoseDetectionModule, TensorFlowCoreModule, unknown]> {
   return Promise.all([
-    import(/* webpackIgnore: true */ "https://esm.sh/@tensorflow-models/pose-detection@2.1.3?bundle") as Promise<PoseDetectionModule>,
-    import(/* webpackIgnore: true */ "https://esm.sh/@tensorflow/tfjs-core@4.22.0?bundle") as Promise<TensorFlowCoreModule>,
-    import(/* webpackIgnore: true */ "https://esm.sh/@tensorflow/tfjs-backend-webgl@4.22.0?bundle")
+    import(/* @vite-ignore */ "https://esm.sh/@tensorflow-models/pose-detection@2.1.3?bundle") as Promise<PoseDetectionModule>,
+    import(/* @vite-ignore */ "https://esm.sh/@tensorflow/tfjs-core@4.22.0?bundle") as Promise<TensorFlowCoreModule>,
+    import(/* @vite-ignore */ "https://esm.sh/@tensorflow/tfjs-backend-webgl@4.22.0?bundle")
   ]);
 }
 
@@ -45,6 +47,8 @@ export interface RakaatDetectionHook {
   increment: () => void;
   decrement: () => void;
   finishCurrent: () => boolean;
+  facingMode: CameraFacingMode;
+  switchCamera: () => Promise<void>;
 }
 
 function isPermissionDenied(error: unknown): boolean {
@@ -58,6 +62,7 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
   const [error, setError] = useState<string | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [previewVisible, setPreviewVisible] = useState(true);
+  const [facingMode, setFacingMode] = useState<CameraFacingMode>("environment");
   const modelRef = useRef<PoseModel | null>(null);
   const rafRef = useRef<number | null>(null);
   const stoppedRef = useRef(true);
@@ -115,7 +120,8 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
     rafRef.current = window.requestAnimationFrame(() => { void detectionLoop(); });
   }, [applyStablePosture, videoRef]);
 
-  const start = useCallback(async () => {
+  const startWithFacing = useCallback(async (preferredFacingMode: CameraFacingMode) => {
+    if (streamRef.current) return;
     setError(null);
     if (!window.isSecureContext && window.location.hostname !== "localhost") {
       setStatus("Kamera tidak didukung");
@@ -129,13 +135,16 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
     }
     setStatus("Meminta izin kamera");
     try {
-      const constraints: MediaStreamConstraints = { video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 15 } }, audio: false };
+      const buildConstraints = (mode: CameraFacingMode): MediaStreamConstraints => ({ video: { facingMode: { ideal: mode }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 15 } }, audio: false });
       let media: MediaStream;
       try {
-        media = await navigator.mediaDevices.getUserMedia(constraints);
+        media = await navigator.mediaDevices.getUserMedia(buildConstraints(preferredFacingMode));
+        setFacingMode(preferredFacingMode);
       } catch (firstError) {
         if (isPermissionDenied(firstError)) throw firstError;
-        media = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "user" }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 15 } }, audio: false });
+        const fallbackMode: CameraFacingMode = preferredFacingMode === "environment" ? "user" : "environment";
+        media = await navigator.mediaDevices.getUserMedia(buildConstraints(fallbackMode));
+        setFacingMode(fallbackMode);
       }
       streamRef.current = media;
       setStream(media);
@@ -167,6 +176,20 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
     }
   }, [detectionLoop, videoRef]);
 
+  const start = useCallback(async () => {
+    await startWithFacing(facingMode);
+  }, [facingMode, startWithFacing]);
+
+  const switchCamera = useCallback(async () => {
+    const nextMode: CameraFacingMode = facingMode === "environment" ? "user" : "environment";
+    const wasRunning = Boolean(streamRef.current);
+    stop();
+    setFacingMode(nextMode);
+    if (wasRunning) {
+      window.setTimeout(() => { void startWithFacing(nextMode); }, 150);
+    }
+  }, [facingMode, startWithFacing, stop]);
+
   const reset = useCallback(() => {
     setCounter((current) => resetRakaatState(current.target));
     setPosture("Tidak terdeteksi");
@@ -189,5 +212,5 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
 
   useEffect(() => stop, [stop]);
 
-  return { counter, posture, status, error, stream, previewVisible, setPreviewVisible, setTarget, start, stop, reset, increment, decrement, finishCurrent };
+  return { counter, posture, status, error, stream, previewVisible, setPreviewVisible, setTarget, start, stop, reset, increment, decrement, finishCurrent, facingMode, switchCamera };
 }

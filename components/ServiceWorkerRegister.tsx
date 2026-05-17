@@ -1,3 +1,11 @@
 "use client";
 import { useEffect } from "react";
-export default function ServiceWorkerRegister() { useEffect(() => { if ("serviceWorker" in navigator && process.env.NODE_ENV === "production") void navigator.serviceWorker.register("/sw.js").catch(() => undefined); }, []); return null; }
+
+export default function ServiceWorkerRegister() {
+  useEffect(() => {
+    if ("serviceWorker" in navigator && import.meta.env.PROD) {
+      void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    }
+  }, []);
+  return null;
+}
