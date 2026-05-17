@@ -7,6 +7,8 @@ export interface Reminder {
   createdAt: string;
   source: "voice" | "manual" | "prayer";
   prayerName?: PrayerName;
+  completed?: boolean;
+  snoozedUntil?: string | null;
 }
 
 export interface CommandHistoryItem {
@@ -16,10 +18,15 @@ export interface CommandHistoryItem {
   createdAt: string;
 }
 
+export type PersistentReminderMode = "off" | "gentle" | "strong";
+
 export interface AssistantSettings {
   voiceEnabled: boolean;
   speechRate: "slow" | "normal" | "fast";
   notificationSound: boolean;
+  prayerVoiceEnabled: boolean;
+  reminderVoiceEnabled: boolean;
+  persistentReminderMode: PersistentReminderMode;
 }
 
 export interface DndState {

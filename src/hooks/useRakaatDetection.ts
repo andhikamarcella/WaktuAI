@@ -57,7 +57,7 @@ function isPermissionDenied(error: unknown): boolean {
 export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: number) => void): RakaatDetectionHook {
   const [counter, setCounter] = useState<RakaatCounterState>(() => createInitialRakaatState(4));
   const [posture, setPosture] = useState<RakaatPosture>("Tidak terdeteksi");
-  const [status, setStatus] = useState<RakaatStatus>("Kamera belum aktif");
+  const [status, setStatus] = useState<RakaatStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [previewVisible, setPreviewVisible] = useState(true);
@@ -78,7 +78,7 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
     setStream(null);
     modelRef.current?.dispose?.();
     modelRef.current = null;
-    setStatus("Kamera belum aktif");
+    setStatus("idle");
   }, []);
 
   const applyStablePosture = useCallback((nextPosture: RakaatPosture) => {
@@ -87,10 +87,10 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
     setCounter((current) => {
       const result = advanceRakaatState(current, nextPosture);
       if (result.counted) {
-        setStatus("Rakaat terdeteksi");
+        setStatus("detecting");
         onCounted?.(result.state.count);
       } else {
-        setStatus("Mendeteksi gerakan");
+        setStatus("detecting");
       }
       return result.state;
     });
@@ -122,19 +122,20 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
   const startWithFacing = useCallback(async (preferredFacingMode: CameraFacingMode) => {
     if (streamRef.current) return;
     setError(null);
+    setStatus("checking-support");
     if (!window.isSecureContext && window.location.hostname !== "localhost") {
-      setStatus("Kamera tidak didukung");
-      setError("Kamera membutuhkan HTTPS atau localhost agar aman digunakan.");
+      setStatus("insecure-context");
+      setError("Kamera hanya bisa dipakai di HTTPS atau localhost.");
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      setStatus("Kamera tidak didukung");
-      setError("Browser ini belum mendukung akses kamera.");
+      setStatus("unsupported-browser");
+      setError("Browser ini belum mendukung kamera untuk deteksi rakaat. Pakai tombol manual.");
       return;
     }
-    setStatus("Meminta izin kamera");
+    setStatus("requesting-camera");
     try {
-      const buildConstraints = (mode: CameraFacingMode): MediaStreamConstraints => ({ video: { facingMode: { ideal: mode }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 15 } }, audio: false });
+      const buildConstraints = (mode: CameraFacingMode): MediaStreamConstraints => ({ video: { facingMode: { ideal: mode }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 20 } }, audio: false });
       let media: MediaStream;
       try {
         media = await navigator.mediaDevices.getUserMedia(buildConstraints(preferredFacingMode));
@@ -151,21 +152,39 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
         videoRef.current.srcObject = media;
         await videoRef.current.play();
       }
-      setStatus("Kamera aktif");
-      const [poseDetection, tf] = await loadPoseModules();
-      await tf.setBackend("webgl").catch(() => false);
-      await tf.ready();
-      modelRef.current = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING });
+      setStatus("loading-model");
+      let timeoutId: number | null = null;
+      try {
+        const modelPromise = (async () => {
+          const [poseDetection, tf] = await loadPoseModules();
+          await tf.setBackend("webgl").catch(() => false);
+          await tf.ready();
+          return poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING });
+        })();
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(() => reject(new Error("Model AI terlalu lama dimuat. Coba lagi atau pakai tombol manual.")), 15_000);
+        });
+        modelRef.current = await Promise.race([modelPromise, timeoutPromise]);
+      } catch (modelError) {
+        setStatus("model-unavailable");
+        setError(modelError instanceof Error && modelError.message.includes("terlalu lama") ? modelError.message : "Model AI deteksi gerakan belum bisa dimuat. Pakai hitung manual dulu.");
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        setStream(null);
+        return;
+      } finally {
+        if (timeoutId !== null) window.clearTimeout(timeoutId);
+      }
       stoppedRef.current = false;
-      setStatus("Mendeteksi gerakan");
+      setStatus("detecting");
       rafRef.current = window.requestAnimationFrame(() => { void detectionLoop(); });
     } catch (caught) {
       if (isPermissionDenied(caught)) {
-        setStatus("Kamera ditolak");
-        setError("Izin kamera ditolak. Aktifkan izin kamera di pengaturan browser, atau gunakan tombol manual.");
+        setStatus("camera-denied");
+        setError("Izin kamera ditolak. Aktifkan izin kamera di browser atau pakai hitung manual.");
       } else {
-        setStatus("Kamera tidak didukung");
-        setError("Kamera atau model deteksi tidak tersedia. Counter manual tetap bisa digunakan.");
+        setStatus("camera-unavailable");
+        setError("Kamera tidak ditemukan. Kamu tetap bisa pakai tombol manual.");
       }
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;

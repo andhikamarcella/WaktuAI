@@ -9,14 +9,20 @@ export type RakaatMachineState =
   | "SECOND_SUJUD_DETECTED"
   | "WAITING_FOR_NEXT_STANDING";
 
-export type RakaatStatus =
-  | "Kamera belum aktif"
-  | "Meminta izin kamera"
-  | "Kamera aktif"
-  | "Mendeteksi gerakan"
-  | "Rakaat terdeteksi"
-  | "Kamera ditolak"
-  | "Kamera tidak didukung";
+export type RakaatDetectionState =
+  | "idle"
+  | "checking-support"
+  | "requesting-camera"
+  | "loading-model"
+  | "detecting"
+  | "camera-denied"
+  | "camera-unavailable"
+  | "model-unavailable"
+  | "unsupported-browser"
+  | "insecure-context"
+  | "error";
+
+export type RakaatStatus = RakaatDetectionState;
 
 export interface PoseLandmark {
   name: string;

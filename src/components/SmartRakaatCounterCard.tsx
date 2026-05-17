@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RAKAAT_SEQUENCE } from "@/src/lib/rakaatDetection";
 import { useRakaatDetection } from "@/src/hooks/useRakaatDetection";
-import type { RakaatExternalAction } from "@/src/types/rakaat";
+import type { RakaatDetectionState, RakaatExternalAction } from "@/src/types/rakaat";
 
 interface SmartRakaatCounterCardProps {
   voiceEnabled: boolean;
@@ -9,6 +9,25 @@ interface SmartRakaatCounterCardProps {
   action: { type: RakaatExternalAction; nonce: number };
   onCountChange: (count: number, target: 2 | 3 | 4) => void;
   onMobileChange: (mobile: boolean) => void;
+}
+
+
+const STATE_LABELS: Record<RakaatDetectionState, string> = {
+  idle: "Belum aktif",
+  "checking-support": "Mengecek dukungan kamera",
+  "requesting-camera": "Meminta izin kamera",
+  "loading-model": "Memuat model AI...",
+  detecting: "Mendeteksi gerakan",
+  "camera-denied": "Izin kamera ditolak. Aktifkan izin kamera di browser atau pakai hitung manual.",
+  "camera-unavailable": "Kamera tidak ditemukan. Kamu tetap bisa pakai tombol manual.",
+  "model-unavailable": "Model AI deteksi gerakan belum bisa dimuat. Pakai hitung manual dulu.",
+  "unsupported-browser": "Browser ini belum mendukung kamera untuk deteksi rakaat. Pakai tombol manual.",
+  "insecure-context": "Kamera hanya bisa dipakai di HTTPS atau localhost.",
+  error: "Terjadi kendala deteksi. Pakai hitung manual dulu."
+};
+
+function isFailureState(status: RakaatDetectionState): boolean {
+  return ["camera-denied", "camera-unavailable", "model-unavailable", "unsupported-browser", "insecure-context", "error"].includes(status);
 }
 
 function ordinalIndonesian(count: number): string {
@@ -68,7 +87,7 @@ export default function SmartRakaatCounterCard({ voiceEnabled, speechRate, actio
         <h2 id="rakaat-title" className="break-words text-2xl font-bold text-[var(--text)]">Deteksi Rakaat</h2>
       </div>
       <label className="text-sm font-semibold text-[var(--text)]">Target
-        <select className="input mt-1" value={detector.counter.target} onChange={(e) => detector.setTarget(Number(e.target.value) as 2 | 3 | 4)} aria-label="Target rakaat">
+        <select className="input mt-1" value={detector.counter.target} onChange={(e) => detector.setTarget(Number(e.target.value) as 2 | 3 | 4)} aria-label="Set target rakaat 2/3/4">
           <option value={2}>2</option><option value={3}>3</option><option value={4}>4</option>
         </select>
       </label>
@@ -79,7 +98,7 @@ export default function SmartRakaatCounterCard({ voiceEnabled, speechRate, actio
     <p className="mt-4 break-words text-sm text-[var(--text-soft)]">Kamera diproses langsung di perangkat kamu dan tidak dikirim ke server.</p>
     <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_1.2fr]">
       <div className="rounded-3xl border border-[var(--border)] bg-[var(--primary-soft)] p-4 text-center sm:p-5">
-        <p className="break-words text-sm font-semibold text-[var(--text)]">Status: {detector.status}</p>
+        <p className="break-words text-sm font-semibold text-[var(--text)]">Status: {STATE_LABELS[detector.status]}</p>
         <div className="mt-3 text-6xl font-black tabular-nums text-[var(--text)] sm:text-7xl">{detector.counter.count}</div>
         <p className="mt-1 font-semibold text-[var(--text)]">{progress}</p>
         <p className="mt-3 text-sm text-[var(--text-soft)]">Postur: <strong className="text-[var(--text)]">{detector.posture}</strong></p>
@@ -94,16 +113,18 @@ export default function SmartRakaatCounterCard({ voiceEnabled, speechRate, actio
           <label className="flex min-h-[44px] items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--bg-soft)] px-3 text-sm text-[var(--text)]"><input type="checkbox" checked={detector.previewVisible} onChange={(e) => detector.setPreviewVisible(e.target.checked)} /> Preview kamera</label>
           <button className="btn-secondary" onClick={() => { void detector.switchCamera(); }} disabled={!mobile}>🔄 {cameraLabel}</button>
         </div>
-        {detector.error && <p className="mt-2 rounded-xl border border-[var(--border)] bg-[var(--bg-soft)] p-3 text-sm text-[var(--text)]">{detector.error}</p>}
+        {(detector.error || isFailureState(detector.status)) && <div className="mt-2 rounded-xl border border-[var(--border)] bg-[var(--bg-soft)] p-3 text-sm text-[var(--text)]"><p>{detector.error ?? STATE_LABELS[detector.status]}</p><p className="mt-1 text-xs text-[var(--text-soft)]">Deteksi AI bersifat opsional. Hitung manual tetap aman dipakai.</p></div>}
       </div>
     </div>
 
     <div className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-      <button className="btn-primary" onClick={() => { if (mobile) void detector.start(); }} disabled={!mobile || detector.stream !== null}>Mulai Deteksi</button>
+      <button className="btn-primary" onClick={() => { if (mobile) void detector.start(); }} disabled={!mobile || detector.stream !== null || detector.status === "loading-model"}>{detector.status === "model-unavailable" ? "Coba Muat Model Lagi" : "Mulai Deteksi"}</button>
+      {isFailureState(detector.status) && <button className="btn-secondary" onClick={() => { if (mobile) void detector.start(); }} disabled={!mobile}>Coba Lagi</button>}
+      <button className="btn-secondary" onClick={() => detector.increment()}>Pakai Hitung Manual</button>
       <button className="btn-secondary" onClick={detector.stop}>Stop</button>
-      <button className="btn-secondary" onClick={() => { if (window.confirm("Reset hitungan rakaat?")) detector.reset(); }}>Reset Rakaat</button>
-      <button className="btn-secondary" onClick={detector.increment}>Tambah Manual</button>
-      <button className="btn-secondary" onClick={detector.decrement}>Kurangi Manual</button>
+      <button className="btn-secondary" onClick={() => { if (window.confirm("Reset hitungan rakaat?")) detector.reset(); }}>Reset</button>
+      <button className="btn-secondary" onClick={detector.increment}>Tambah rakaat</button>
+      <button className="btn-secondary" onClick={detector.decrement}>Kurangi rakaat</button>
       <button className="btn-secondary" onClick={detector.finishCurrent}>Selesai Rakaat</button>
     </div>
 
