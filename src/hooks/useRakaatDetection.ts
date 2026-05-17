@@ -21,6 +21,15 @@ interface TensorFlowCoreModule {
   ready: () => Promise<void>;
 }
 
+
+function loadPoseModules(): Promise<[PoseDetectionModule, TensorFlowCoreModule, unknown]> {
+  return Promise.all([
+    import(/* webpackIgnore: true */ "https://esm.sh/@tensorflow-models/pose-detection@2.1.3?bundle") as Promise<PoseDetectionModule>,
+    import(/* webpackIgnore: true */ "https://esm.sh/@tensorflow/tfjs-core@4.22.0?bundle") as Promise<TensorFlowCoreModule>,
+    import(/* webpackIgnore: true */ "https://esm.sh/@tensorflow/tfjs-backend-webgl@4.22.0?bundle")
+  ]);
+}
+
 export interface RakaatDetectionHook {
   counter: RakaatCounterState;
   posture: RakaatPosture;
@@ -135,11 +144,7 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
         await videoRef.current.play();
       }
       setStatus("Kamera aktif");
-      const [poseDetection, tf] = await Promise.all([
-        import("@tensorflow-models/pose-detection") as Promise<PoseDetectionModule>,
-        import("@tensorflow/tfjs-core") as Promise<TensorFlowCoreModule>,
-        import("@tensorflow/tfjs-backend-webgl")
-      ]);
+      const [poseDetection, tf] = await loadPoseModules();
       await tf.setBackend("webgl").catch(() => false);
       await tf.ready();
       modelRef.current = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING });

@@ -1,4 +1,4 @@
-declare module "@tensorflow-models/pose-detection" {
+declare module "https://esm.sh/@tensorflow-models/pose-detection@2.1.3?bundle" {
   export const SupportedModels: { MoveNet: unknown };
   export const movenet: { modelType: { SINGLEPOSE_LIGHTNING: string } };
   export function createDetector(model: unknown, config?: unknown): Promise<{
@@ -7,10 +7,9 @@ declare module "@tensorflow-models/pose-detection" {
   }>;
 }
 
-declare module "@tensorflow/tfjs-backend-webgl" {}
-
-
-declare module "@tensorflow/tfjs-core" {
+declare module "https://esm.sh/@tensorflow/tfjs-core@4.22.0?bundle" {
   export function setBackend(backendName: string): Promise<boolean>;
   export function ready(): Promise<void>;
 }
+
+declare module "https://esm.sh/@tensorflow/tfjs-backend-webgl@4.22.0?bundle" {}

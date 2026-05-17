@@ -14,10 +14,7 @@
     "@tailwindcss/postcss": "latest",
     "next": "latest",
     "react": "latest",
-    "react-dom": "latest",
-    "@tensorflow-models/pose-detection": "latest",
-    "@tensorflow/tfjs-backend-webgl": "latest",
-    "@tensorflow/tfjs-core": "latest"
+    "react-dom": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
