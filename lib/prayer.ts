@@ -1,5 +1,6 @@
 import type { CityOption, NextPrayer, PrayerName, PrayerSchedule, PrayerTime } from "@/types/prayer";
 import { getDateKey, parseTimeToday } from "./time";
+import { calculateQiblaBearing } from "@/src/lib/qibla";
 
 export const PRAYER_NAMES: PrayerName[] = ["Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"];
 export const JAKARTA: CityOption = { name: "Jakarta", latitude: -6.2088, longitude: 106.8456 };
@@ -115,14 +116,7 @@ export function findNextPrayer(prayers: PrayerTime[], now = new Date()): NextPra
 }
 
 export function calculateQiblaDirection(latitude: number, longitude: number): number {
-  const kaabaLat = (21.4225 * Math.PI) / 180;
-  const kaabaLng = (39.8262 * Math.PI) / 180;
-  const lat = (latitude * Math.PI) / 180;
-  const lng = (longitude * Math.PI) / 180;
-  const dLng = kaabaLng - lng;
-  const y = Math.sin(dLng);
-  const x = Math.cos(lat) * Math.tan(kaabaLat) - Math.sin(lat) * Math.cos(dLng);
-  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  return calculateQiblaBearing(latitude, longitude);
 }
 
 export function getHijriMonthGrid(day: number, month: string, year: string): Array<{ day: number; label: string; isToday: boolean; important?: string }> {

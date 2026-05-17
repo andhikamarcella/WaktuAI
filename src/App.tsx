@@ -7,8 +7,9 @@ import ReminderList from "@/components/ReminderList";
 import ThemeToggle from "@/components/ThemeToggle";
 import VoiceAssistant from "@/components/VoiceAssistant";
 import SmartRakaatCounterCard from "@/src/components/SmartRakaatCounterCard";
+import QiblaCard from "@/src/components/QiblaCard";
 import { DEFAULT_NOTIFICATION_SETTINGS, getNotificationPermission, requestNotificationPermission, schedulePrayerNotifications, scheduleReminders } from "@/lib/notifications";
-import { CITIES, JAKARTA, calculateQiblaDirection, fetchPrayerSchedule, findNextPrayer, getCachedPrayerSchedule, getHijriMonthGrid } from "@/lib/prayer";
+import { CITIES, JAKARTA, fetchPrayerSchedule, findNextPrayer, getCachedPrayerSchedule, getHijriMonthGrid } from "@/lib/prayer";
 import { buildReminder, prunePastReminders } from "@/lib/reminders";
 import { readStorage, writeStorage } from "@/lib/storage";
 import { formatClock, formatIndonesianDate, getDateKey, getPassedPrayerCount } from "@/lib/time";
@@ -16,6 +17,7 @@ import { ParsedCommand, UNKNOWN_RESPONSE, parseVoiceCommand } from "@/lib/voiceC
 import type { CityOption, PrayerName, PrayerSchedule } from "@/types/prayer";
 import type { AssistantSettings, CommandHistoryItem, DndState, Reminder } from "@/types/reminder";
 import type { RakaatExternalAction } from "@/src/types/rakaat";
+import { useQibla } from "@/src/hooks/useQibla";
 
 const quotes = ["Sholat tepat waktu adalah latihan terbaik untuk disiplin hati.", "Mulai dari satu kebaikan kecil, jaga konsistensinya.", "Waktu adalah amanah; gunakan untuk yang mendekatkan pada Allah."];
 const defaultAssistant: AssistantSettings = { voiceEnabled: true, speechRate: "normal", notificationSound: false };
@@ -40,7 +42,6 @@ export default function App() {
   const [dnd, setDnd] = useState<DndState>({ until: null });
   const [completed, setCompleted] = useState<Record<PrayerName, boolean>>({ Subuh: false, Dzuhur: false, Ashar: false, Maghrib: false, Isya: false });
   const [onboarding, setOnboarding] = useState(false);
-  const [heading, setHeading] = useState(0);
   const [rakaatAction, setRakaatAction] = useState<{ type: RakaatExternalAction; nonce: number }>({ type: null, nonce: 0 });
   const [rakaatInfo, setRakaatInfo] = useState<{ count: number; target: 2 | 3 | 4; mobile: boolean }>({ count: 0, target: 4, mobile: false });
 
@@ -59,13 +60,11 @@ export default function App() {
     finally { setLoading(false); }
   }, []);
   useEffect(() => { if (!mounted) return; void loadSchedule(city, city.name === "Jakarta" ? "fallback" : "city"); writeStorage("waktuai.city", city); }, [city, loadSchedule, mounted]);
-  useEffect(() => { if (!mounted || !("geolocation" in navigator) || readStorage("waktuai.cityTouched", false)) return; navigator.geolocation.getCurrentPosition((pos) => { const gps = { name: "Lokasi GPS", latitude: pos.coords.latitude, longitude: pos.coords.longitude }; setCity(gps); void loadSchedule(gps, "gps"); }, () => undefined, { enableHighAccuracy: false, timeout: 6000, maximumAge: 3_600_000 }); }, [loadSchedule, mounted]);
-  useEffect(() => { const onOrientation = (event: DeviceOrientationEvent) => { if (typeof event.alpha === "number") setHeading(event.alpha); }; window.addEventListener("deviceorientation", onOrientation); return () => window.removeEventListener("deviceorientation", onOrientation); }, []);
   useEffect(() => { if (!notifEnabled || !schedule) return; return schedulePrayerNotifications(schedule, notifSettings, assistant.notificationSound, dnd); }, [notifEnabled, schedule, notifSettings, assistant.notificationSound, dnd]);
   useEffect(() => scheduleReminders(reminders, assistant.notificationSound, dnd, (id) => setReminders((items) => items.filter((r) => r.id !== id))), [reminders, assistant.notificationSound, dnd]);
 
   const nextPrayer = useMemo(() => schedule ? findNextPrayer(schedule.prayers, now) : null, [schedule, now]);
-  const qibla = useMemo(() => calculateQiblaDirection(city.latitude, city.longitude), [city]);
+  const qibla = useQibla(city);
   const progressPassed = schedule ? getPassedPrayerCount(schedule.prayers, now) : 0;
   const hijriDay = Number(schedule?.hijri?.day ?? 1);
   const hijriGrid = schedule?.hijri ? getHijriMonthGrid(hijriDay, schedule.hijri.month, schedule.hijri.year) : [];
@@ -89,7 +88,7 @@ export default function App() {
     if (parsed.type === "DISABLE_ADZAN_NOTIFICATION") { if (parsed.prayerName) setNotifSettings((s) => ({ ...s, [parsed.prayerName!]: { ...s[parsed.prayerName!], enabled: false } })); else setNotifEnabled(false); out = parsed.prayerName ? `Notifikasi ${parsed.prayerName} dimatikan.` : "Notifikasi adzan dimatikan."; }
     if (parsed.type === "CREATE_REMINDER") { const at = parsed.reminderAt ?? (parsed.prayerName && schedule ? new Date(schedule.prayers.find((p) => p.name === parsed.prayerName)?.dateTime ?? Date.now()) : null); if (at && at.getTime() > Date.now()) { setReminders((r) => [...r, buildReminder(parsed.reminderLabel ?? "Reminder WaktuAI", at, parsed.prayerName ? "prayer" : "voice")]); out = `Siap, aku ingatkan pada ${at.toLocaleString("id-ID")}.`; } else out = "Aku belum bisa membaca waktu reminder itu. Coba: ingatkan aku jam 7 malam."; }
     if (parsed.type === "SET_LOCATION" && parsed.cityName) { const c = CITIES.find((x) => x.name === parsed.cityName); if (c) { writeStorage("waktuai.cityTouched", true); setCity(c); out = `Lokasi diganti ke ${c.name}.`; } }
-    if (parsed.type === "SHOW_QIBLA") out = `Arah kiblat dari ${city.name} sekitar ${Math.round(qibla)} derajat dari utara.`;
+    if (parsed.type === "SHOW_QIBLA") out = `Arah kiblat dari ${qibla.city.name} sekitar ${Math.round(qibla.qiblaBearing)} derajat dari utara.`;
     if (parsed.type === "ENABLE_DND") { const until = new Date(Date.now() + (parsed.dndMinutes ?? 60) * 60_000).toISOString(); setDnd({ until }); out = `Mode jangan ganggu aktif sampai ${new Date(until).toLocaleString("id-ID")}.`; }
     if (parsed.type === "DISABLE_DND") { setDnd({ until: null }); out = "Mode jangan ganggu dimatikan."; }
     if (parsed.type === "START_RAKAAT_DETECTION") { if (!rakaatInfo.mobile) out = "Fitur deteksi rakaat hanya tersedia di HP."; else { setRakaatAction({ type: "start", nonce: Date.now() }); out = "Memulai deteksi rakaat. Pastikan mulai dari posisi berdiri."; } }
@@ -99,7 +98,7 @@ export default function App() {
     if (parsed.type === "DECREMENT_RAKAAT") { setRakaatAction({ type: "decrement", nonce: Date.now() }); out = "Rakaat dikurangi manual."; }
     if (parsed.type === "GET_RAKAAT_COUNT") out = `Saat ini ${rakaatInfo.count} dari ${rakaatInfo.target} rakaat.`;
     respond(parsed.raw, out);
-  }, [city.name, qibla, rakaatInfo, respond, schedule]);
+  }, [qibla.city.name, qibla.qiblaBearing, rakaatInfo, respond, schedule]);
   const submitCommand = (text: string) => handleParsed(parseVoiceCommand(text));
   const resetSettings = () => {
     if (!window.confirm("Reset semua pengaturan WaktuAI di perangkat ini?")) return;
@@ -114,7 +113,7 @@ export default function App() {
     <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold text-[var(--primary)]">AI Islamic Productivity</p><h1 className="text-3xl font-black tracking-tight sm:text-4xl">WaktuAI</h1></div><ThemeToggle theme={theme} onToggle={() => setTheme(theme === "dark" ? "light" : "dark")} /></header>
     <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-3"><div className="grid min-w-0 gap-4 sm:gap-5 lg:col-span-2"><ClockCard now={now} /><VoiceAssistant command={command} response={response} onSubmit={submitCommand} onQuickAction={submitCommand} /><PrayerScheduleCard schedule={schedule} loading={loading} error={error} completed={completed} onToggleComplete={(name) => setCompleted((c) => ({ ...c, [name]: !c[name] }))} onRetry={() => loadSchedule(city)} onCityChange={(name) => { const c = CITIES.find((x) => x.name === name); if (c) { writeStorage("waktuai.cityTouched", true); setCity(c); } }} cities={CITIES.map((c) => c.name)} /><NotificationSettings enabled={notifEnabled} permission={permission} settings={notifSettings} assistant={assistant} dnd={dnd} onEnable={() => { setNotifEnabled(true); void requestNotificationPermission().then((p) => setPermission(p)); }} onDisable={() => setNotifEnabled(false)} onPrayerChange={(name, patch) => setNotifSettings((s) => ({ ...s, [name]: { ...s[name], ...patch } }))} onAssistantChange={(patch) => setAssistant((a) => ({ ...a, ...patch }))} onDnd={(minutes) => setDnd({ until: minutes ? new Date(Date.now() + minutes * 60_000).toISOString() : null })} /></div>
       <aside className="grid min-w-0 gap-4 sm:gap-5"><NextPrayerCard nextPrayer={nextPrayer} now={now} /><SmartRakaatCounterCard voiceEnabled={assistant.voiceEnabled} speechRate={assistant.speechRate} action={rakaatAction} onCountChange={handleRakaatCountChange} onMobileChange={handleRakaatMobileChange} /><section className="card"><p className="text-sm font-semibold text-[var(--primary)]">Dashboard Harian</p><h2 className="text-2xl font-bold">{schedule?.hijri ? `${schedule.hijri.day} ${schedule.hijri.month} ${schedule.hijri.year} H` : "Tanggal Hijri"}</h2><p className="mt-2 text-sm text-[var(--text-soft)]">{formatIndonesianDate(now)} · {city.name}</p><p className="mt-3">Berikutnya: <strong>{nextPrayer?.prayer.name ?? "-"}</strong></p><p className="mt-1 text-sm">{quotes[now.getDate() % quotes.length]}</p><div className="mt-4 h-3 overflow-hidden rounded-full bg-[var(--bg-soft)]"><div className="h-full rounded-full bg-indigo-500" style={{ width: `${(progressPassed / 5) * 100}%` }} /></div><p className="mt-1 text-xs">{progressPassed} dari 5 waktu telah masuk.</p></section>
-      <section className="card"><h2 className="text-2xl font-bold">Arah Kiblat</h2><div className="mx-auto mt-5 grid aspect-square w-full max-w-48 place-items-center rounded-full border-8 border-[var(--primary-soft)] bg-[var(--bg-soft)]"><div className="text-center" style={{ transform: `rotate(${qibla - heading}deg)` }}><div className="text-5xl">▲</div><p className="font-bold">Kiblat</p></div></div><p className="mt-3 text-center text-lg font-bold">{Math.round(qibla)}° dari utara</p><p className="text-center text-sm text-[var(--text-soft)]">Kompas perangkat dipakai jika browser mendukung orientasi.</p></section>
+      <QiblaCard qibla={qibla} onManualCityChange={(name) => { const selected = CITIES.find((item) => item.name === name); if (selected) { writeStorage("waktuai.cityTouched", true); setCity(selected); } }} />
       <section className="card"><h2 className="text-2xl font-bold">Kalender Hijri</h2><div className="mt-4 grid grid-cols-5 gap-2">{hijriGrid.map((d) => <div key={d.day} title={d.label} className={`rounded-xl p-2 text-center text-sm ${d.isToday ? "bg-[var(--primary)] font-bold text-[var(--primary-text)]" : "border border-[var(--border)] bg-[var(--bg-soft)]"}`}>{d.day}{d.important && <span className="block text-xs">★</span>}</div>)}</div></section><ReminderList reminders={reminders} history={history} onDelete={(id) => setReminders((r) => r.filter((x) => x.id !== id))} onClearHistory={() => setHistory([])} /></aside></div>
     <footer className="grid gap-3 py-8 text-center text-sm text-[var(--muted)]"><p>Install WaktuAI dari menu browser “Add to Home Screen”. Build static Vite: npm install, npm run dev, npm run build; output: dist.</p><button className="btn-secondary mx-auto" onClick={resetSettings}>Reset Pengaturan</button></footer>
   </div></main>;

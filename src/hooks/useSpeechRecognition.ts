@@ -1,4 +1,3 @@
-"use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type SpeechRecognitionErrorCode = "aborted" | "audio-capture" | "bad-grammar" | "language-not-supported" | "network" | "no-speech" | "not-allowed" | "phrases-not-supported" | "service-not-allowed";

@@ -1,4 +1,3 @@
-"use client";
 import { RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { advanceRakaatState, classifyPosture, createInitialRakaatState, finishCurrentRakaat, manualDecrement, manualIncrement, resetRakaatState } from "@/src/lib/rakaatDetection";
 import type { PoseLandmark, RakaatCounterState, RakaatPosture, RakaatStatus } from "@/src/types/rakaat";

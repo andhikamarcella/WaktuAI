@@ -1,4 +1,3 @@
-"use client";
 import { useEffect, useRef, useState } from "react";
 import { RAKAAT_SEQUENCE } from "@/src/lib/rakaatDetection";
 import { useRakaatDetection } from "@/src/hooks/useRakaatDetection";

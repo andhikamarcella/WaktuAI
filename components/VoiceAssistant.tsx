@@ -1,4 +1,3 @@
-"use client";
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useSpeechRecognition } from "@/src/hooks/useSpeechRecognition";
 

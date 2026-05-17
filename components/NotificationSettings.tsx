@@ -18,12 +18,12 @@ export default function NotificationSettings({ enabled, permission, settings, as
   const sendTestNotification = async () => {
     if (typeof window === "undefined") return;
     if (!("Notification" in window)) {
-      window.alert("Browser ini belum mendukung notifikasi.");
+      globalThis.alert("Browser ini belum mendukung notifikasi.");
       return;
     }
     const result = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
     if (result === "granted") new Notification("WaktuAI - Tes Notifikasi", { body: "Notifikasi aktif dan siap dipakai.", icon: "/icon.svg" });
-    else window.alert("Izin notifikasi ditolak. Aktifkan dari pengaturan situs di browser.");
+    else globalThis.alert("Izin notifikasi ditolak. Aktifkan dari pengaturan situs di browser.");
   };
   const dndActive = dnd.until && new Date(dnd.until).getTime() > Date.now();
   return <section className="card" aria-labelledby="notif-title">

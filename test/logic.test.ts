@@ -3,6 +3,7 @@ import { findNextPrayer, normalizePrayerTimes } from "../lib/prayer";
 import { parseIndonesianTimePhrase } from "../lib/reminders";
 import { formatClock, getGreeting } from "../lib/time";
 import { parseVoiceCommand } from "../lib/voiceCommands";
+import { calculateQiblaBearing } from "../src/lib/qibla";
 import { advanceRakaatState, createInitialRakaatState, manualDecrement, manualIncrement, resetRakaatState } from "../src/lib/rakaatDetection";
 
 describe("voiceCommands", () => {
@@ -99,5 +100,18 @@ describe("rakaatDetection", () => {
     state = advanceRakaatState(state, "Berdiri", 4000).state;
     expect(state.count).toBe(0);
     expect(state.machineState).toBe("STANDING_STARTED");
+  });
+});
+
+
+describe("qibla", () => {
+  it.each([
+    ["Jakarta", -6.2088, 106.8456, 295],
+    ["Bekasi", -6.2383, 106.9756, 295],
+    ["Bandung", -6.9175, 107.6191, 295],
+    ["Surabaya", -7.2575, 112.7521, 294]
+  ])("calculates qibla bearing for %s", (_city: string, latitude: number, longitude: number, expected: number) => {
+    expect(calculateQiblaBearing(latitude, longitude)).toBeGreaterThanOrEqual(expected - 3);
+    expect(calculateQiblaBearing(latitude, longitude)).toBeLessThanOrEqual(expected + 3);
   });
 });

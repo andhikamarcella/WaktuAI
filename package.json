@@ -5,23 +5,25 @@
   "description": "WaktuAI - asisten suara ringan untuk waktu, adzan, kiblat, reminder, dan notifikasi.",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "vite": "latest",
+    "typescript": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "tailwindcss": "latest",
+    "postcss": "latest",
+    "autoprefixer": "latest",
+    "@tailwindcss/vite": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "tailwindcss": "latest",
-    "typescript": "latest",
-    "vitest": "latest",
-    "@tailwindcss/vite": "latest"
+    "vitest": "latest"
   }
 }
