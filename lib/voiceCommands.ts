@@ -14,6 +14,12 @@ export type CommandType =
   | "SHOW_QIBLA"
   | "ENABLE_DND"
   | "DISABLE_DND"
+  | "START_RAKAAT_DETECTION"
+  | "STOP_RAKAAT_DETECTION"
+  | "RESET_RAKAAT"
+  | "INCREMENT_RAKAAT"
+  | "DECREMENT_RAKAAT"
+  | "GET_RAKAAT_COUNT"
   | "UNKNOWN";
 
 export interface ParsedCommand {
@@ -81,6 +87,13 @@ export function parseVoiceCommand(input: string, base = new Date()): ParsedComma
     if (reminderAt) return { type: "CREATE_REMINDER", raw, reminderAt, reminderLabel: `Reminder: ${raw}` };
     if (prayerName) return { type: "CREATE_REMINDER", raw, prayerName, reminderLabel: `Ingatkan sholat ${prayerName}` };
   }
+
+  if (/(mulai|start|aktifkan).*(deteksi )?rakaat/.test(text)) return { type: "START_RAKAAT_DETECTION", raw };
+  if (/(stop|berhenti|matikan).*(deteksi )?rakaat/.test(text)) return { type: "STOP_RAKAAT_DETECTION", raw };
+  if (/(reset|ulang).*(rakaat)/.test(text)) return { type: "RESET_RAKAAT", raw };
+  if (/(tambah|tambahkan|plus).*(rakaat)/.test(text)) return { type: "INCREMENT_RAKAAT", raw };
+  if (/(kurangi|minus).*(rakaat)/.test(text)) return { type: "DECREMENT_RAKAAT", raw };
+  if (/(rakaat).*(berapa|sekarang|saat ini)|berapa rakaat/.test(text)) return { type: "GET_RAKAAT_COUNT", raw };
 
   if (/(arah kiblat|kiblat|qibla)/.test(text)) return { type: "SHOW_QIBLA", raw };
   if (/(jadwal|bacakan).*(sholat|shalat|solat|adzan|azan)|^(jadwal sholat|jadwal solat|jadwal shalat)/.test(text)) return { type: "GET_ALL_PRAYER_TIMES", raw };
