@@ -1,0 +1,9 @@
+import type { CommandHistoryItem, Reminder } from "@/types/reminder";
+import { formatShortDateTime } from "@/lib/time";
+
+export default function ReminderList({ reminders, history, onDelete, onClearHistory }: { reminders: Reminder[]; history: CommandHistoryItem[]; onDelete: (id: string) => void; onClearHistory: () => void }) {
+  return <section className="card p-5" aria-labelledby="reminder-title"><h2 id="reminder-title" className="text-2xl font-bold">Reminder & Riwayat</h2>
+    <div className="mt-4"><p className="font-semibold">Reminder aktif</p>{reminders.length === 0 ? <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">Belum ada reminder. Coba: “ingatkan aku jam 7 malam”.</p> : <div className="mt-2 grid gap-2">{reminders.map((r) => <div key={r.id} className="flex items-center justify-between rounded-2xl bg-white/60 p-3 dark:bg-white/5"><div><p className="font-medium">{r.label}</p><p className="text-sm text-slate-600 dark:text-slate-300">{formatShortDateTime(new Date(r.scheduledAt))}</p></div><button className="btn-secondary" onClick={() => onDelete(r.id)} aria-label={`Hapus ${r.label}`}>Hapus</button></div>)}</div>}</div>
+    <div className="mt-6"><div className="flex items-center justify-between"><p className="font-semibold">10 perintah terakhir</p><button className="btn-secondary" onClick={onClearHistory}>Bersihkan</button></div>{history.length === 0 ? <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">Riwayat perintah tersimpan privat di perangkat ini.</p> : <ol className="mt-2 grid gap-2">{history.map((h) => <li key={h.id} className="rounded-2xl bg-white/60 p-3 text-sm dark:bg-white/5"><p className="font-semibold">“{h.command}”</p><p className="text-slate-600 dark:text-slate-300">{h.response}</p><time className="text-xs text-slate-500">{formatShortDateTime(new Date(h.createdAt))}</time></li>)}</ol>}</div>
+  </section>;
+}
