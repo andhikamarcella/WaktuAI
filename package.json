@@ -1,29 +1,31 @@
 {
   "name": "waktuai",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "WaktuAI - asisten suara ringan untuk waktu, adzan, kiblat, reminder, dan notifikasi.",
+  "main": "node_modules/expo/AppEntry.js",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "test": "vitest run"
+    "start": "expo start",
+    "android": "expo run:android",
+    "test": "jest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "tailwindcss": "latest",
-    "postcss": "latest",
-    "autoprefixer": "latest",
-    "@tailwindcss/vite": "latest"
+    "@react-native-async-storage/async-storage": "2.1.2",
+    "expo": "~53.0.10",
+    "expo-camera": "~16.1.6",
+    "expo-location": "~18.1.6",
+    "expo-notifications": "~0.31.4",
+    "expo-sensors": "~14.1.4",
+    "expo-speech": "~13.1.7",
+    "react": "19.0.0",
+    "react-native": "0.79.2",
+    "react-native-safe-area-context": "5.4.0"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "vitest": "latest"
+    "@types/jest": "^29.5.14",
+    "@types/react": "~19.0.10",
+    "jest": "^29.7.0",
+    "jest-expo": "~53.0.5",
+    "typescript": "~5.8.3"
   }
 }
