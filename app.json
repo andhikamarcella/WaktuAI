@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "WaktuAI",
+    "slug": "waktuai",
+    "version": "2.0.0",
+    "orientation": "portrait",
+    "scheme": "waktuai",
+    "android": {
+      "package": "com.waktuai.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "POST_NOTIFICATIONS",
+        "RECORD_AUDIO",
+        "CAMERA"
+      ]
+    },
+    "plugins": [
+      "expo-notifications",
+      "expo-camera",
+      "expo-location"
+    ]
+  }
+}
