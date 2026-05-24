@@ -312,6 +312,17 @@ select {
   border: 1px solid var(--border);
 }
 
+.enhanced-rakaat {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--panel) 92%, transparent), color-mix(in srgb, var(--panel-soft) 72%, transparent)),
+    var(--panel);
+}
+
+.skeleton-frame {
+  border-color: color-mix(in srgb, var(--primary) 34%, var(--border));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 18px 60px rgba(15, 118, 110, 0.18);
+}
+
 .video-frame video,
 .video-placeholder {
   width: 100%;
@@ -322,9 +333,34 @@ select {
   object-fit: cover;
 }
 
+.skeleton-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.camera-badge {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 3;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.72);
+  color: #ecfeff;
+  padding: 0.38rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 800;
+  backdrop-filter: blur(12px);
+}
+
 .video-placeholder {
   position: absolute;
   inset: 0;
+  z-index: 4;
   display: grid;
   place-items: center;
   padding: 16px;
@@ -340,6 +376,10 @@ select {
   gap: 8px;
   align-content: center;
   background: var(--panel-soft);
+}
+
+.enhanced-rakaat .counter-box {
+  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
 }
 
 .counter-box strong {

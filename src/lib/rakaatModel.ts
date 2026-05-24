@@ -1,81 +1,131 @@
 export type RakaatPosture = "berdiri" | "rukuk" | "sujud" | "duduk" | "unknown";
 
+export type RakaatLandmark = {
+  name: string;
+  x: number;
+  y: number;
+  score: number;
+};
+
+export type RakaatDetectionResult = {
+  posture: RakaatPosture;
+  landmarks: RakaatLandmark[];
+};
+
 export type RakaatDetector = {
-  detect(video: HTMLVideoElement): RakaatPosture;
+  detect(video: HTMLVideoElement): Promise<RakaatDetectionResult>;
   dispose(): void;
 };
 
-type Sample = {
-  top: number;
-  middle: number;
-  bottom: number;
+type PoseModel = {
+  estimatePoses(video: HTMLVideoElement): Promise<Array<{ keypoints?: RakaatLandmark[] }>>;
+  dispose?: () => void;
 };
 
-function createCanvas(): HTMLCanvasElement {
-  const canvas = document.createElement("canvas");
-  canvas.width = 96;
-  canvas.height = 72;
-  return canvas;
+type PoseDetectionModule = {
+  createDetector(model: unknown, config?: unknown): Promise<PoseModel>;
+  SupportedModels: { MoveNet: unknown };
+  movenet: { modelType: { SINGLEPOSE_LIGHTNING: string } };
+};
+
+type TensorFlowCoreModule = {
+  setBackend(backendName: string): Promise<boolean>;
+  ready(): Promise<void>;
+};
+
+export const SKELETON_CONNECTIONS: Array<[string, string]> = [
+  ["left_shoulder", "right_shoulder"],
+  ["left_shoulder", "left_elbow"],
+  ["left_elbow", "left_wrist"],
+  ["right_shoulder", "right_elbow"],
+  ["right_elbow", "right_wrist"],
+  ["left_shoulder", "left_hip"],
+  ["right_shoulder", "right_hip"],
+  ["left_hip", "right_hip"],
+  ["left_hip", "left_knee"],
+  ["left_knee", "left_ankle"],
+  ["right_hip", "right_knee"],
+  ["right_knee", "right_ankle"]
+];
+
+function normalizeName(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`).toLowerCase();
 }
 
-function sampleFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement): Sample | null {
-  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) return null;
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
-  const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
-  let top = 0;
-  let middle = 0;
-  let bottom = 0;
-  let topCount = 0;
-  let middleCount = 0;
-  let bottomCount = 0;
+function point(landmarks: RakaatLandmark[], names: string[], minScore = 0.25): RakaatLandmark | null {
+  const normalizedNames = names.map(normalizeName);
+  return landmarks.find((landmark) => normalizedNames.includes(normalizeName(landmark.name)) && landmark.score >= minScore) ?? null;
+}
 
-  for (let y = 0; y < canvas.height; y += 2) {
-    for (let x = 0; x < canvas.width; x += 2) {
-      const i = (y * canvas.width + x) * 4;
-      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      const weight = brightness < 110 ? 1 : 0;
-      if (y < canvas.height / 3) {
-        top += weight;
-        topCount++;
-      } else if (y < (canvas.height * 2) / 3) {
-        middle += weight;
-        middleCount++;
-      } else {
-        bottom += weight;
-        bottomCount++;
-      }
-    }
-  }
-
+function midpoint(a: RakaatLandmark, b: RakaatLandmark): RakaatLandmark {
   return {
-    top: top / Math.max(1, topCount),
-    middle: middle / Math.max(1, middleCount),
-    bottom: bottom / Math.max(1, bottomCount)
+    name: `${a.name}-${b.name}`,
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    score: Math.min(a.score, b.score)
   };
 }
 
-function classify(sample: Sample): RakaatPosture {
-  const total = sample.top + sample.middle + sample.bottom;
-  if (total < 0.03) return "unknown";
-  if (sample.top > sample.middle * 0.9 && sample.middle > sample.bottom * 0.75) return "berdiri";
-  if (sample.middle > sample.top * 1.2 && sample.middle > sample.bottom * 0.8) return "rukuk";
-  if (sample.bottom > sample.middle * 1.25 && sample.bottom > sample.top * 1.7) return "sujud";
-  if (sample.middle > sample.top * 0.8 && sample.bottom > sample.top * 0.9) return "duduk";
+function classifyPose(landmarks: RakaatLandmark[]): RakaatPosture {
+  const leftShoulder = point(landmarks, ["left_shoulder", "leftShoulder"]);
+  const rightShoulder = point(landmarks, ["right_shoulder", "rightShoulder"]);
+  const leftHip = point(landmarks, ["left_hip", "leftHip"]);
+  const rightHip = point(landmarks, ["right_hip", "rightHip"]);
+  const leftKnee = point(landmarks, ["left_knee", "leftKnee"]);
+  const rightKnee = point(landmarks, ["right_knee", "rightKnee"]);
+  const nose = point(landmarks, ["nose"]);
+  if (!leftShoulder || !rightShoulder || !leftHip || !rightHip || !leftKnee || !rightKnee || !nose) return "unknown";
+
+  const shoulder = midpoint(leftShoulder, rightShoulder);
+  const hip = midpoint(leftHip, rightHip);
+  const knee = midpoint(leftKnee, rightKnee);
+  const bodyHeight = Math.max(1, Math.abs(knee.y - nose.y));
+  const torsoDx = Math.abs(shoulder.x - hip.x) / bodyHeight;
+  const shoulderHipDy = Math.abs(hip.y - shoulder.y) / bodyHeight;
+  const hipKneeDy = Math.abs(knee.y - hip.y) / bodyHeight;
+  const headBelowHip = (nose.y - hip.y) / bodyHeight;
+
+  if (headBelowHip > 0.1 && shoulder.y > hip.y - bodyHeight * 0.05) return "sujud";
+  if (hipKneeDy < 0.14 && shoulder.y < hip.y) return "duduk";
+  if (shoulderHipDy < 0.16 && headBelowHip < 0.1) return "rukuk";
+  if (shoulder.y < hip.y && hip.y < knee.y && torsoDx < 0.28 && hipKneeDy > 0.24) return "berdiri";
   return "unknown";
 }
 
+async function loadPoseModules(): Promise<[PoseDetectionModule, TensorFlowCoreModule, unknown]> {
+  return Promise.all([
+    import(/* @vite-ignore */ "https://esm.sh/@tensorflow-models/pose-detection@2.1.3?bundle") as Promise<PoseDetectionModule>,
+    import(/* @vite-ignore */ "https://esm.sh/@tensorflow/tfjs-core@4.22.0?bundle") as Promise<TensorFlowCoreModule>,
+    import(/* @vite-ignore */ "https://esm.sh/@tensorflow/tfjs-backend-webgl@4.22.0?bundle")
+  ]);
+}
+
 export async function createBrowserRakaatDetector(): Promise<RakaatDetector> {
-  const canvas = createCanvas();
+  const [poseDetection, tf] = await loadPoseModules();
+  await tf.setBackend("webgl").catch(() => false);
+  await tf.ready();
+  const model = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
+    modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING
+  });
+
   return {
-    detect(video: HTMLVideoElement): RakaatPosture {
-      const sample = sampleFrame(video, canvas);
-      return sample ? classify(sample) : "unknown";
+    async detect(video: HTMLVideoElement): Promise<RakaatDetectionResult> {
+      const poses = await model.estimatePoses(video);
+      const landmarks = (poses[0]?.keypoints ?? [])
+        .filter((pointItem) => Number.isFinite(pointItem.x) && Number.isFinite(pointItem.y))
+        .map((pointItem) => ({
+          name: normalizeName(pointItem.name),
+          x: pointItem.x,
+          y: pointItem.y,
+          score: pointItem.score ?? 0
+        }));
+      return {
+        posture: classifyPose(landmarks),
+        landmarks
+      };
     },
     dispose(): void {
-      canvas.width = 1;
-      canvas.height = 1;
+      model.dispose?.();
     }
   };
 }

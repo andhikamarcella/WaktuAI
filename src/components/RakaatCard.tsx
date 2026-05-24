@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { RakaatDetector, RakaatPosture } from "../lib/rakaatModel";
+import type { RakaatDetectionResult, RakaatDetector, RakaatLandmark, RakaatPosture } from "../lib/rakaatModel";
 
 type DetectionState =
   | "idle"
@@ -24,12 +24,29 @@ const STATE_MESSAGES: Partial<Record<DetectionState, string>> = {
 };
 
 const SEQUENCE: RakaatPosture[] = ["berdiri", "rukuk", "sujud", "duduk", "sujud", "berdiri"];
+type FacingMode = "environment" | "user";
+const SKELETON_CONNECTIONS: Array<[string, string]> = [
+  ["left_shoulder", "right_shoulder"],
+  ["left_shoulder", "left_elbow"],
+  ["left_elbow", "left_wrist"],
+  ["right_shoulder", "right_elbow"],
+  ["right_elbow", "right_wrist"],
+  ["left_shoulder", "left_hip"],
+  ["right_shoulder", "right_hip"],
+  ["left_hip", "right_hip"],
+  ["left_hip", "left_knee"],
+  ["left_knee", "left_ankle"],
+  ["right_hip", "right_knee"],
+  ["right_knee", "right_ankle"]
+];
 
 export function RakaatCard() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const frameRef = useRef<number | null>(null);
   const detectorRef = useRef<RakaatDetector | null>(null);
+  const detectingFrameRef = useRef(false);
   const phaseRef = useRef(0);
   const lastPostureRef = useRef<RakaatPosture>("unknown");
   const lastAdvanceRef = useRef(0);
@@ -39,6 +56,9 @@ export function RakaatCard() {
   const [target, setTarget] = useState<2 | 3 | 4>(4);
   const [posture, setPosture] = useState<RakaatPosture>("unknown");
   const [phase, setPhase] = useState(0);
+  const [facingMode, setFacingMode] = useState<FacingMode>("environment");
+  const [skeletonVisible, setSkeletonVisible] = useState(true);
+  const [skeletonPoints, setSkeletonPoints] = useState(0);
   const [status, setStatus] = useState("Hitung manual siap dipakai kapan saja.");
 
   const stopDetection = () => {
@@ -50,7 +70,9 @@ export function RakaatCard() {
     streamRef.current = null;
     detectorRef.current?.dispose();
     detectorRef.current = null;
+    detectingFrameRef.current = false;
     if (videoRef.current) videoRef.current.srcObject = null;
+    clearSkeleton();
     if (state === "detecting") setState("idle");
   };
 
@@ -94,42 +116,107 @@ export function RakaatCard() {
     lastPostureRef.current = next;
   };
 
+  const clearSkeleton = () => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+    setSkeletonPoints(0);
+  };
+
+  const findLandmark = (landmarks: RakaatLandmark[], name: string): RakaatLandmark | undefined => {
+    return landmarks.find((landmark) => landmark.name === name && landmark.score >= 0.25);
+  };
+
+  const drawSkeleton = (result: RakaatDetectionResult) => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    const width = video.videoWidth || video.clientWidth || 640;
+    const height = video.videoHeight || video.clientHeight || 480;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.clearRect(0, 0, width, height);
+    if (!skeletonVisible) return;
+
+    const confident = result.landmarks.filter((landmark) => landmark.score >= 0.25);
+    setSkeletonPoints(confident.length);
+    context.lineWidth = Math.max(3, width / 180);
+    context.strokeStyle = "#5eead4";
+    context.fillStyle = "#fde68a";
+    context.shadowColor = "rgba(15, 118, 110, 0.55)";
+    context.shadowBlur = 10;
+
+    for (const [from, to] of SKELETON_CONNECTIONS) {
+      const start = findLandmark(result.landmarks, from);
+      const end = findLandmark(result.landmarks, to);
+      if (!start || !end) continue;
+      context.beginPath();
+      context.moveTo(start.x, start.y);
+      context.lineTo(end.x, end.y);
+      context.stroke();
+    }
+
+    for (const landmark of confident) {
+      context.beginPath();
+      context.arc(landmark.x, landmark.y, Math.max(4, width / 130), 0, Math.PI * 2);
+      context.fill();
+    }
+    context.shadowBlur = 0;
+  };
+
   const startLoop = () => {
-    const tick = () => {
+    const tick = async () => {
       const detector = detectorRef.current;
       const video = videoRef.current;
-      if (detector && video) {
-        const next = detector.detect(video);
-        setPosture(next);
-        advanceByPosture(next);
+      if (detector && video && !detectingFrameRef.current) {
+        detectingFrameRef.current = true;
+        try {
+          const result = await detector.detect(video);
+          drawSkeleton(result);
+          setPosture(result.posture);
+          advanceByPosture(result.posture);
+        } catch {
+          setStatus("Model AI gagal membaca frame. Deteksi dihentikan, tombol manual tetap aktif.");
+          setState("error");
+          stopDetection();
+        } finally {
+          detectingFrameRef.current = false;
+        }
       }
       frameRef.current = requestAnimationFrame(tick);
     };
     frameRef.current = requestAnimationFrame(tick);
   };
 
-  const requestCamera = async (): Promise<MediaStream> => {
+  const requestCamera = async (preferredFacingMode: FacingMode): Promise<MediaStream> => {
     const base = {
       width: { ideal: 640 },
       height: { ideal: 480 },
       frameRate: { ideal: 15, max: 20 }
     };
     try {
-      return await navigator.mediaDevices.getUserMedia({
-        video: { ...base, facingMode: { ideal: "environment" } },
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { ...base, facingMode: { ideal: preferredFacingMode } },
         audio: false
       });
+      setFacingMode(preferredFacingMode);
+      return stream;
     } catch (error) {
       const first = error instanceof DOMException ? error.name : "";
       if (first === "NotAllowedError" || first === "SecurityError") throw error;
-      return navigator.mediaDevices.getUserMedia({
-        video: { ...base, facingMode: "user" },
+      const fallbackMode: FacingMode = preferredFacingMode === "environment" ? "user" : "environment";
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { ...base, facingMode: { ideal: fallbackMode } },
         audio: false
       });
+      setFacingMode(fallbackMode);
+      return stream;
     }
   };
 
-  const startDetection = async () => {
+  const startDetection = async (preferredFacingMode = facingMode) => {
     stopDetection();
     setState("checking-support");
     setStatus("Mengecek dukungan kamera.");
@@ -145,8 +232,8 @@ export function RakaatCard() {
 
     try {
       setState("requesting-camera");
-      setStatus("Meminta izin kamera.");
-      const stream = await requestCamera();
+      setStatus(preferredFacingMode === "user" ? "Meminta izin kamera depan." : "Meminta izin kamera belakang.");
+      const stream = await requestCamera(preferredFacingMode);
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -161,7 +248,7 @@ export function RakaatCard() {
       });
       detectorRef.current = await Promise.race([modelPromise, timeoutPromise]);
       setState("detecting");
-      setStatus("Deteksi eksperimental aktif. Jika tidak akurat, pakai tombol manual.");
+      setStatus("Pose skeleton aktif. Rakaat tetap hanya dihitung dari urutan lengkap, bukan dari sujud saja.");
       startLoop();
     } catch (error) {
       stopDetection();
@@ -182,22 +269,34 @@ export function RakaatCard() {
     }
   };
 
+  const switchCamera = async (nextMode: FacingMode) => {
+    setFacingMode(nextMode);
+    if (state === "detecting" || state === "loading-model" || streamRef.current) {
+      await startDetection(nextMode);
+    } else {
+      setStatus(nextMode === "user" ? "Kamera depan dipilih. Tekan Mulai Deteksi." : "Kamera belakang dipilih. Tekan Mulai Deteksi.");
+    }
+  };
+
   const message = STATE_MESSAGES[state];
   const phaseText = phase === 0 ? "Menunggu berdiri" : `Langkah ${phase + 1} dari ${SEQUENCE.length}: ${SEQUENCE[phase]}`;
+  const cameraLabel = facingMode === "user" ? "Kamera depan" : "Kamera belakang";
 
   return (
-    <section className="panel rakaat-panel" id="rakaat">
+    <section className="panel rakaat-panel enhanced-rakaat" id="rakaat">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Deteksi rakaat</p>
-          <h2>Hitung rakaat aman dengan fallback manual</h2>
+          <h2>AI pose skeleton dengan fallback manual</h2>
         </div>
         <span className={`status-pill ${state === "detecting" ? "ok" : ""}`}>{state}</span>
       </div>
 
       <div className="rakaat-grid">
-        <div className="video-frame">
+        <div className="video-frame skeleton-frame">
           <video ref={videoRef} playsInline muted aria-label="Preview kamera deteksi rakaat" />
+          <canvas ref={canvasRef} className="skeleton-canvas" aria-hidden="true" />
+          <div className="camera-badge">{cameraLabel}</div>
           {state !== "detecting" && <div className="video-placeholder">Kamera aktif setelah kamu menekan Mulai Deteksi.</div>}
         </div>
 
@@ -206,6 +305,7 @@ export function RakaatCard() {
           <strong>{count}/{target}</strong>
           <span>Postur: {posture}</span>
           <span>{phaseText}</span>
+          <span>Skeleton points: {skeletonPoints}</span>
         </div>
       </div>
 
@@ -213,9 +313,12 @@ export function RakaatCard() {
       <p className="muted">{status}</p>
 
       <div className="button-row">
-        <button onClick={startDetection}>{state === "model-unavailable" ? "Coba Muat Model Lagi" : "Mulai Deteksi"}</button>
+        <button onClick={() => { void startDetection(facingMode); }}>{state === "model-unavailable" ? "Coba Muat Model Lagi" : "Mulai Deteksi"}</button>
         <button className="secondary" onClick={stopDetection}>Stop Kamera</button>
+        <button className={facingMode === "user" ? "selected" : "secondary"} onClick={() => { void switchCamera("user"); }}>Kamera Depan</button>
+        <button className={facingMode === "environment" ? "selected" : "secondary"} onClick={() => { void switchCamera("environment"); }}>Kamera Belakang</button>
         <button className="secondary" onClick={() => setStatus("Mode manual aktif. Gunakan tombol tambah, kurang, reset, dan selesai rakaat.")}>Pakai Hitung Manual</button>
+        <button className={skeletonVisible ? "selected" : "secondary"} onClick={() => setSkeletonVisible((visible) => !visible)}>{skeletonVisible ? "Skeleton Aktif" : "Skeleton Mati"}</button>
       </div>
 
       <div className="target-row" aria-label="Set target rakaat">
