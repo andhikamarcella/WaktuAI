@@ -1,6 +1,6 @@
 import { RefObject, useCallback, useEffect, useRef, useState } from "react";
-import { advanceRakaatState, classifyPosture, createInitialRakaatState, finishCurrentRakaat, manualDecrement, manualIncrement, resetRakaatState } from "@/src/lib/rakaatDetection";
-import type { PoseLandmark, RakaatCounterState, RakaatPosture, RakaatStatus } from "@/src/types/rakaat";
+import { advanceRakaatState, classifyPosture, createInitialRakaatState, finishCurrentRakaat, manualDecrement, manualIncrement, resetRakaatState } from "../lib/rakaatDetection";
+import type { PoseLandmark, RakaatCounterState, RakaatPosture, RakaatStatus } from "../types/rakaat";
 
 type VideoRef = RefObject<HTMLVideoElement | null>;
 
@@ -84,7 +84,7 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
   const applyStablePosture = useCallback((nextPosture: RakaatPosture) => {
     setPosture(nextPosture);
     if (nextPosture === "Tidak terdeteksi") return;
-    setCounter((current) => {
+    setCounter((current: RakaatCounterState) => {
       const result = advanceRakaatState(current, nextPosture);
       if (result.counted) {
         setStatus("detecting");
@@ -209,16 +209,16 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
   }, [facingMode, startWithFacing, stop]);
 
   const reset = useCallback(() => {
-    setCounter((current) => resetRakaatState(current.target));
+    setCounter((current: RakaatCounterState) => resetRakaatState(current.target));
     setPosture("Tidak terdeteksi");
     candidateRef.current = { posture: "Tidak terdeteksi", since: 0, frames: 0 };
   }, []);
 
-  const increment = useCallback(() => setCounter((current) => manualIncrement(current)), []);
-  const decrement = useCallback(() => setCounter((current) => manualDecrement(current)), []);
+  const increment = useCallback(() => setCounter((current: RakaatCounterState) => manualIncrement(current)), []);
+  const decrement = useCallback(() => setCounter((current: RakaatCounterState) => manualDecrement(current)), []);
   const finishCurrent = useCallback(() => {
     let counted = false;
-    setCounter((current) => {
+    setCounter((current: RakaatCounterState) => {
       const result = finishCurrentRakaat(current);
       counted = result.counted;
       if (result.counted) onCounted?.(result.state.count);
@@ -226,7 +226,7 @@ export function useRakaatDetection(videoRef: VideoRef, onCounted?: (count: numbe
     });
     return counted;
   }, [onCounted]);
-  const setTarget = useCallback((target: 2 | 3 | 4) => setCounter((current) => ({ ...current, target, count: Math.min(current.count, target) })), []);
+  const setTarget = useCallback((target: 2 | 3 | 4) => setCounter((current: RakaatCounterState) => ({ ...current, target, count: Math.min(current.count, target) })), []);
 
   useEffect(() => stop, [stop]);
 

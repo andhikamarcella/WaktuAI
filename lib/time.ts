@@ -1,4 +1,4 @@
-import type { PrayerTime } from "@/types/prayer";
+import type { PrayerTime } from "../types/prayer";
 
 export const INDONESIAN_LOCALE = "id-ID";
 

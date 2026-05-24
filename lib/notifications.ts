@@ -1,5 +1,5 @@
-import type { PrayerName } from "@/types/prayer";
-import type { DndState } from "@/types/reminder";
+import type { PrayerName } from "../types/prayer";
+import type { DndState } from "../types/reminder";
 
 export type LeadMinutes = 0 | 5 | 10 | 15;
 export type NotificationPermissionState = "unsupported" | NotificationPermission;

@@ -1,4 +1,4 @@
-import type { AssistantSettings } from "@/types/reminder";
+import type { AssistantSettings } from "../types/reminder";
 
 export function speakIndonesian(text: string, settings: Pick<AssistantSettings, "voiceEnabled" | "speechRate">): boolean {
   if (!settings.voiceEnabled || typeof window === "undefined" || !("speechSynthesis" in window)) return false;

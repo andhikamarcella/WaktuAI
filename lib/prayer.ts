@@ -1,6 +1,6 @@
-import type { CityOption, NextPrayer, PrayerName, PrayerSchedule, PrayerTime } from "@/types/prayer";
+import type { CityOption, NextPrayer, PrayerName, PrayerSchedule, PrayerTime } from "../types/prayer";
 import { getDateKey, parseTimeToday } from "./time";
-import { calculateQiblaBearing } from "@/src/lib/qibla";
+import { calculateQiblaBearing } from "../src/lib/qibla";
 
 export const PRAYER_NAMES: PrayerName[] = ["Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"];
 export const JAKARTA: CityOption = { name: "Jakarta", latitude: -6.2088, longitude: 106.8456 };

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { RAKAAT_SEQUENCE } from "@/src/lib/rakaatDetection";
-import { useRakaatDetection } from "@/src/hooks/useRakaatDetection";
-import type { RakaatDetectionState, RakaatExternalAction } from "@/src/types/rakaat";
+import { RAKAAT_SEQUENCE } from "../lib/rakaatDetection";
+import { useRakaatDetection } from "../hooks/useRakaatDetection";
+import type { RakaatDetectionState, RakaatExternalAction } from "../types/rakaat";
 
 interface SmartRakaatCounterCardProps {
   voiceEnabled: boolean;
@@ -55,7 +55,7 @@ export default function SmartRakaatCounterCard({ voiceEnabled, speechRate, actio
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const handledActionNonceRef = useRef(0);
   const mobile = useIsMobile();
-  const detector = useRakaatDetection(videoRef, (count) => {
+  const detector = useRakaatDetection(videoRef, (count: number) => {
     if (!voiceEnabled || typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const utterance = new SpeechSynthesisUtterance(`Rakaat ${ordinalIndonesian(count)} selesai.`);
     utterance.lang = "id-ID";
@@ -129,7 +129,7 @@ export default function SmartRakaatCounterCard({ voiceEnabled, speechRate, actio
     </div>
 
     <ol className="mt-5 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2 lg:grid-cols-3" aria-label="Urutan gerakan rakaat">
-      {RAKAAT_SEQUENCE.map((step) => {
+      {RAKAAT_SEQUENCE.map((step: string) => {
         const done = detector.counter.completedSteps.includes(step);
         return <li key={step} className={`rounded-2xl border p-3 text-[var(--text)] ${done ? "border-[var(--primary)] bg-[var(--primary-soft)] font-bold" : "border-[var(--border)] bg-[var(--bg-soft)]"}`}>{done ? "✓ " : "○ "}{step}</li>;
       })}

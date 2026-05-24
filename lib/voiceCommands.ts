@@ -1,4 +1,4 @@
-import type { PrayerName } from "@/types/prayer";
+import type { PrayerName } from "../types/prayer";
 import { CITIES } from "./prayer";
 import { parseReminderInput } from "./reminders";
 
@@ -99,6 +99,9 @@ export function parseVoiceCommand(input: string, base = new Date()): ParsedComma
 
   if (/(notifikasi|notif|pengingat)/.test(text) && /(matikan|matiin|nonaktif|off)/.test(text)) return { type: "DISABLE_ADZAN_NOTIFICATION", raw, prayerName };
   if (/(notifikasi|notif|pengingat)/.test(text) && /(aktifkan|nyalain|hidupkan|on)/.test(text)) return { type: "ENABLE_ADZAN_NOTIFICATION", raw, prayerName, leadMinutes };
+  if (prayerName && leadMinutes !== undefined && /(ingatkan|pengingat|reminder|notifikasi|notif)/.test(text)) {
+    return { type: "ENABLE_ADZAN_NOTIFICATION", raw, prayerName, leadMinutes };
+  }
 
   const reminder = parseReminderInput(text, base);
   if (reminder && (/^(\d{1,2})[:.](\d{2})$/.test(text) || /(ingatkan|reminder|bangunin|\bjam\b)/.test(text))) {

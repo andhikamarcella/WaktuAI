@@ -1,4 +1,4 @@
-import type { Reminder } from "@/types/reminder";
+import type { Reminder } from "../types/reminder";
 import { formatHourMinute, parseExactLocalTime } from "./time";
 
 export interface ParsedReminderTime {
