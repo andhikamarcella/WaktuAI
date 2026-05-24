@@ -1,14 +1,18 @@
 {
-  "name": "WaktuAI - Asisten Waktu, Adzan, dan Reminder",
+  "name": "WaktuAI",
   "short_name": "WaktuAI",
-  "description": "Asisten suara ringan untuk jam real-time, jadwal sholat, adzan, reminder, kiblat, dan notifikasi.",
+  "description": "Jadwal sholat, reminder, notifikasi, suara, kiblat, dan hitung rakaat.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#f8fafc",
-  "theme_color": "#059669",
-  "orientation": "portrait-primary",
+  "theme_color": "#0f766e",
   "icons": [
-    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
   ]
 }

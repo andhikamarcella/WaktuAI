@@ -1,12 +1,18 @@
-import React from "react";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
-import "./index.css";
+import "./styles.css";
 
 createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <ServiceWorkerRegister />
+  <StrictMode>
     <App />
-  </React.StrictMode>
+  </StrictMode>
 );
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {
+      // PWA caching is optional. The app must keep working without it.
+    });
+  });
+}

@@ -1,53 +1,69 @@
-import { useCallback, useEffect, useRef } from "react";
-import type { Reminder, AssistantSettings, DndState } from "@/types/reminder";
-import { showBrowserNotification, isDndActive } from "@/lib/notifications";
-import { readStorage, writeStorage } from "@/lib/storage";
-import { speakIndonesian } from "@/lib/speech";
+import { useCallback, useEffect } from "react";
+import { Reminder } from "../lib/reminders";
+import { sendBrowserNotification } from "../lib/notifications";
+import { speakIndonesian } from "../lib/speech";
 
-export interface ReminderBannerState { reminder: Reminder; message: string }
-interface Args {
+export type ReminderBanner = {
+  reminder: Reminder;
+  message: string;
+};
+
+type UseReminderSchedulerOptions = {
   reminders: Reminder[];
-  assistant: AssistantSettings;
-  dnd: DndState;
+  sentReminderIds: string[];
+  voiceEnabled: boolean;
+  onSentReminderIdsChange: (ids: string[]) => void;
+  onReminderBanner: (banner: ReminderBanner) => void;
   onToast: (message: string) => void;
-  onFire: (banner: ReminderBannerState) => void;
-}
+  onReminderRepeat: (reminderId: string) => void;
+};
 
-const SENT_KEY = "waktuai.sentReminderIds";
-
-function getSent(): Set<string> { return new Set(readStorage<string[]>(SENT_KEY, [])); }
-function saveSent(sent: Set<string>): void { writeStorage(SENT_KEY, [...sent]); }
-
-export function useReminderScheduler({ reminders, assistant, dnd, onToast, onFire }: Args): void {
-  const argsRef = useRef({ reminders, assistant, dnd, onToast, onFire });
-  argsRef.current = { reminders, assistant, dnd, onToast, onFire };
+export function useReminderScheduler(options: UseReminderSchedulerOptions): void {
+  const {
+    reminders,
+    sentReminderIds,
+    voiceEnabled,
+    onSentReminderIdsChange,
+    onReminderBanner,
+    onToast,
+    onReminderRepeat
+  } = options;
 
   const check = useCallback(() => {
-    const { reminders: current, assistant: settings, dnd: dndState, onToast: toast, onFire: fire } = argsRef.current;
     const now = Date.now();
-    const sent = getSent();
+    let nextSent = sentReminderIds;
     let changed = false;
-    for (const reminder of current) {
-      if (reminder.completed || sent.has(reminder.id)) continue;
-      const target = new Date(reminder.snoozedUntil || reminder.scheduledAt).getTime();
-      if (Number.isNaN(target) || now < target || now - target > 7 * 24 * 60 * 60_000) continue;
-      const message = reminder.label || "Reminder WaktuAI";
-      if (!isDndActive(dndState)) {
-        showBrowserNotification("WaktuAI - Reminder", message, settings.notificationSound, dndState);
-        toast(message);
-        if (settings.reminderVoiceEnabled) speakIndonesian(message, settings);
-        fire({ reminder, message });
-      }
-      sent.add(reminder.id); changed = true;
+
+    for (const reminder of reminders) {
+      if (reminder.done) continue;
+      const due = new Date(reminder.dateTime).getTime();
+      if (Number.isNaN(due) || now < due) continue;
+      const sentKey = `${reminder.id}:${reminder.repeatCount}`;
+      if (sentReminderIds.includes(sentKey)) continue;
+
+      const body = `${reminder.title} sekarang.`;
+      sendBrowserNotification("WaktuAI Reminder", body);
+      onToast(body);
+      if (voiceEnabled) speakIndonesian(`WaktuAI mengingatkan. ${reminder.title}.`);
+      onReminderBanner({ reminder, message: body });
+      nextSent = [...nextSent, sentKey];
+      changed = true;
+      if (reminder.alarmMode && reminder.repeatCount < 3) onReminderRepeat(reminder.id);
     }
-    if (changed) saveSent(sent);
-  }, []);
+
+    if (changed) onSentReminderIdsChange(nextSent);
+  }, [onReminderBanner, onReminderRepeat, onSentReminderIdsChange, onToast, reminders, sentReminderIds, voiceEnabled]);
 
   useEffect(() => {
     check();
     const interval = window.setInterval(check, 20_000);
-    const onVisible = () => { if (document.visibilityState === "visible") check(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => { window.clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") check();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [check]);
 }
