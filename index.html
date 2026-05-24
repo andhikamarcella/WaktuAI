@@ -13,7 +13,49 @@
     <title>WaktuAI</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="boot-screen">
+        <section>
+          <span>WaktuAI</span>
+          <h1>Memuat asisten sholat</h1>
+          <p>Jika halaman berhenti di sini, refresh sekali untuk mengambil versi terbaru aplikasi.</p>
+        </section>
+      </main>
+    </div>
+    <style>
+      .boot-screen {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: Inter, system-ui, sans-serif;
+        background: radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 340px), #f8fafc;
+        color: #0f172a;
+      }
+      .boot-screen section {
+        width: min(520px, 100%);
+        border: 1px solid #dbe7e3;
+        border-radius: 18px;
+        background: #ffffff;
+        padding: 24px;
+        box-shadow: 0 20px 70px rgba(15, 23, 42, 0.12);
+      }
+      .boot-screen span {
+        color: #0f766e;
+        font-weight: 800;
+        text-transform: uppercase;
+        font-size: 12px;
+      }
+      .boot-screen h1 {
+        margin: 8px 0;
+        font-size: 32px;
+        line-height: 1.05;
+      }
+      .boot-screen p {
+        margin: 0;
+        color: #475569;
+      }
+    </style>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
