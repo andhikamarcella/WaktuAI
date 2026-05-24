@@ -6,6 +6,7 @@ import { RakaatCard } from "./components/RakaatCard";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 import { PrayerBanner, PrayerNotificationPreferences, usePrayerNotificationScheduler } from "./hooks/usePrayerNotificationScheduler";
 import { ReminderBanner, useReminderScheduler } from "./hooks/useReminderScheduler";
+import { useSpeechRecognition } from "./hooks/useSpeechRecognition";
 import { getNotificationPermissionState, NotificationPermissionState, requestNotificationPermission, sendBrowserNotification } from "./lib/notifications";
 import { parseReminderInput, Reminder } from "./lib/reminders";
 import { speakIndonesian } from "./lib/speech";
@@ -67,6 +68,18 @@ function App() {
     }, 5500);
   };
 
+  const answer = (message: string) => {
+    setAssistantText(message);
+    if (preferences.voiceEnabled) speakIndonesian(message);
+  };
+
+  const speech = useSpeechRecognition({
+    onFinalResult: (text) => runCommand(text),
+    onStart: () => showToast("Mikrofon aktif. Silakan bicara."),
+    onSuccess: () => showToast("Perintah suara diterima."),
+    onError: () => showToast("Mikrofon belum bisa dipakai. Kamu tetap bisa ketik perintah.")
+  });
+
   useEffect(() => {
     const handler = (event: Event) => {
       event.preventDefault();
@@ -115,16 +128,20 @@ function App() {
     setNotificationState(result);
     if (result === "granted") {
       setPreferences((prefs) => ({ ...prefs, enabled: true }));
+      answer("Notifikasi sholat aktif selama WaktuAI terbuka atau PWA aktif.");
       showToast("Notifikasi sholat aktif selama WaktuAI terbuka atau PWA aktif.");
     } else if (result === "denied") {
+      answer("Izin notifikasi ditolak. Aktifkan lagi dari pengaturan browser.");
       showToast("Izin notifikasi ditolak. Aktifkan lagi dari pengaturan browser.");
     } else {
+      answer("Browser ini belum mendukung Notification API. Aku tetap tampilkan pengingat di dalam aplikasi.");
       showToast("Browser ini belum mendukung Notification API.");
     }
   };
 
   const sendTest = () => {
     const delivered = sendBrowserNotification("WaktuAI - Tes Notifikasi", "Notifikasi aktif saat aplikasi terbuka atau PWA aktif.");
+    answer(delivered ? "Notifikasi tes dikirim." : "Notifikasi browser belum aktif. Fallback in-app ditampilkan.");
     showToast(delivered ? "Notifikasi tes dikirim." : "Notifikasi browser belum aktif. Fallback in-app ditampilkan.");
     setNotificationState(getNotificationPermissionState());
   };
@@ -132,17 +149,19 @@ function App() {
   const disableNotifications = () => {
     setPreferences((prefs) => ({ ...prefs, enabled: false }));
     setPrayerBanner(null);
+    answer("Semua notifikasi sholat dari WaktuAI dimatikan.");
     showToast("Semua notifikasi sholat dari WaktuAI dimatikan.");
   };
 
   const testVoice = () => {
     const spoken = speakIndonesian("Halo, ini suara WaktuAI. Pengingat sholat aktif.");
+    setAssistantText(spoken ? "Tes suara AI diputar." : "SpeechSynthesis tidak didukung browser ini.");
     showToast(spoken ? "Tes suara AI diputar." : "SpeechSynthesis tidak didukung browser ini.");
   };
 
   const createReminder = (input: string) => {
     const parsed = parseReminderInput(input, { prayerTimes: prayerTimeMap });
-    setAssistantText(parsed.response);
+    answer(parsed.response);
     if (parsed.ok) {
       setReminders((items) => [...items, parsed.reminder]);
       showToast(parsed.response);
@@ -151,54 +170,50 @@ function App() {
     }
   };
 
-  const runCommand = (input: string) => {
+  function runCommand(input: string) {
     const parsed = parseVoiceCommand(input);
     setCommand(input);
     if (parsed.intent === "HELP") {
       setShowHelp(true);
-      setAssistantText("Tenang, aku bantu. Kamu bisa pakai WaktuAI untuk tanya jam, jadwal sholat, arah kiblat, reminder, notifikasi sholat, dan hitung rakaat.");
+      answer("Tenang, aku bantu. Kamu bisa pakai WaktuAI untuk tanya jam, jadwal sholat, arah kiblat, reminder, notifikasi sholat, dan hitung rakaat.");
       return;
     }
     if (parsed.intent === "ASK_TIME") {
-      setAssistantText(`Sekarang jam ${formatHHMM(new Date())}.`);
+      answer(`Sekarang jam ${formatHHMM(new Date())}.`);
       return;
     }
     if (parsed.intent === "PRAYER_SCHEDULE") {
-      setAssistantText(prayerTimes.map((item) => `${item.name} ${item.time}`).join(" | "));
+      answer(prayerTimes.map((item) => `${item.name} ${item.time}`).join(" | "));
       return;
     }
     if (parsed.intent === "QIBLA") {
-      setAssistantText("Arah kiblat perlu kompas perangkat dan izin sensor. Jika sensor tidak tersedia, gunakan aplikasi kompas lalu arahkan sekitar 295 derajat dari Jakarta.");
+      answer("Arah kiblat perlu kompas perangkat dan izin sensor. Jika sensor tidak tersedia, gunakan aplikasi kompas lalu arahkan sekitar 295 derajat dari Jakarta.");
       return;
     }
     if (parsed.intent === "TEST_NOTIFICATION") {
       sendTest();
-      setAssistantText("Aku kirim notifikasi tes jika izin browser sudah granted.");
       return;
     }
     if (parsed.intent === "TEST_AI_VOICE") {
       testVoice();
-      setAssistantText("Tes suara AI dijalankan.");
       return;
     }
     if (parsed.intent === "ENABLE_PRAYER_NOTIFICATIONS") {
       void enableNotifications();
-      setAssistantText("Aku minta izin notifikasi browser. Pilih izinkan agar notifikasi bisa dikirim saat WaktuAI terbuka.");
       return;
     }
     if (parsed.intent === "DISABLE_PRAYER_NOTIFICATIONS") {
       disableNotifications();
-      setAssistantText("Notifikasi sholat dimatikan.");
       return;
     }
     if (parsed.intent === "ENABLE_STRONG_REMINDER") {
       setPreferences((prefs) => ({ ...prefs, reminderMode: "strong" }));
-      setAssistantText("Mode Pengingat Berulang diatur ke Strong. Maksimal 4 notifikasi per sholat.");
+      answer("Mode Pengingat Berulang diatur ke Strong. Maksimal 4 notifikasi per sholat.");
       return;
     }
     if (parsed.intent === "DISABLE_STRONG_REMINDER") {
       setPreferences((prefs) => ({ ...prefs, reminderMode: "off" }));
-      setAssistantText("Mode Pengingat Berulang dimatikan.");
+      answer("Mode Pengingat Berulang dimatikan.");
       return;
     }
     if (parsed.intent === "CREATE_EXACT_TIME_REMINDER" && parsed.reminderText) {
@@ -207,17 +222,17 @@ function App() {
     }
     if (parsed.intent === "START_RAKAAT_DETECTION") {
       document.getElementById("rakaat")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      setAssistantText("Buka kartu Deteksi Rakaat lalu tekan Mulai Deteksi. Hitung manual tetap bisa dipakai kapan saja.");
+      answer("Buka kartu Deteksi Rakaat lalu tekan Mulai Deteksi. Hitung manual tetap bisa dipakai kapan saja.");
       return;
     }
     if (parsed.intent === "FALLBACK_MANUAL_RAKAAT") {
       document.getElementById("rakaat")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      setAssistantText("Mode manual tersedia di kartu Deteksi Rakaat: tambah, kurang, reset, target 2/3/4, dan selesai rakaat.");
+      answer("Mode manual tersedia di kartu Deteksi Rakaat: tambah, kurang, reset, target 2/3/4, dan selesai rakaat.");
       return;
     }
-    setAssistantText("Aku belum paham perintah itu. Coba salah satu tombol saran di bawah.");
+    answer("Aku belum paham perintah itu. Coba salah satu tombol saran di bawah.");
     setShowHelp(true);
-  };
+  }
 
   const submitCommand = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -289,6 +304,14 @@ function App() {
     setInstallPrompt(null);
   };
 
+  const micStatus = speech.requesting
+    ? "Meminta izin mikrofon..."
+    : speech.listening
+      ? "Mendengarkan perintah..."
+      : speech.supported
+        ? "Mikrofon siap"
+        : "Mikrofon tidak didukung browser ini";
+
   return (
     <main className="app">
       <section className="hero">
@@ -303,12 +326,54 @@ function App() {
         </div>
       </section>
 
-      <section className="panel assistant-panel">
-        <form onSubmit={submitCommand} className="command-form">
-          <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Contoh: ingatkan aku 17:46" aria-label="Perintah WaktuAI" />
-          <button type="submit">Jalankan</button>
-        </form>
-        <p className="assistant-text">{assistantText}</p>
+      <section className="panel assistant-panel !overflow-visible">
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_220px] lg:items-start">
+          <div className="min-w-0">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <span className="status-pill">{micStatus}</span>
+              {speech.transcript && <span className="status-pill">Terdengar: {speech.transcript}</span>}
+            </div>
+            <form onSubmit={submitCommand} className="command-form">
+              <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Contoh: ingatkan aku 17:46" aria-label="Perintah WaktuAI" />
+              <button type="submit">Jalankan</button>
+            </form>
+            {speech.interimTranscript && <p className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-3 text-sm text-[var(--text)]">Mendengar: {speech.interimTranscript}</p>}
+            {speech.error && <p className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--warning-bg)] p-3 text-sm text-[var(--warning)]">{speech.error}</p>}
+          </div>
+
+          <div className="grid gap-3 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-4 text-center">
+            <button
+              type="button"
+              className={`mx-auto grid h-24 w-24 place-items-center rounded-full text-base font-black shadow-xl transition ${speech.listening ? "animate-pulse bg-red-500 text-white" : "bg-[var(--primary)] text-white"}`}
+              onClick={() => {
+                if (speech.listening) speech.stop();
+                else void speech.start();
+              }}
+              disabled={speech.requesting || !speech.supported}
+              aria-label={speech.listening ? "Stop mikrofon" : "Mulai mikrofon"}
+            >
+              {speech.listening ? "STOP" : "MIC"}
+            </button>
+            <p className="text-sm font-semibold text-[var(--text)]">{micStatus}</p>
+            <div className="grid grid-cols-2 gap-2">
+              <button className="secondary" type="button" onClick={() => { void speech.retry(); }} disabled={speech.requesting || !speech.supported}>Coba Lagi</button>
+              <button className="secondary" type="button" onClick={() => { void speech.runDiagnostic(); }}>Cek Mic</button>
+            </div>
+          </div>
+        </div>
+
+        {speech.diagnostics.length > 0 && (
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            {speech.diagnostics.map((item) => (
+              <div key={item.label} className="rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-3 text-sm">
+                <strong>{item.ok ? "OK" : "Perlu dicek"} - {item.label}</strong>
+                <p className="mt-1 text-[var(--muted)]">{item.detail}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <p className="assistant-text mt-4 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-4 text-base" aria-live="polite">{assistantText}</p>
         {showHelp && <HelpCards onRunCommand={runCommand} />}
       </section>
 
@@ -371,7 +436,7 @@ function App() {
             </label>
             <label className="toggle-row">
               <input type="checkbox" checked={preferences.voiceEnabled} onChange={(event) => setPreferences((prefs) => ({ ...prefs, voiceEnabled: event.target.checked }))} />
-              Suara AI untuk pengingat sholat
+              Suara AI untuk semua jawaban dan pengingat
             </label>
             <label className="toggle-row">
               <input type="checkbox" checked={preferences.doNotDisturb} onChange={(event) => setPreferences((prefs) => ({ ...prefs, doNotDisturb: event.target.checked }))} />
