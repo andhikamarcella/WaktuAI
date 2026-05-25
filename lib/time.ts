@@ -1,4 +1,4 @@
-import type { PrayerTime } from "@/types/prayer";
+import type { PrayerTime } from "../types/prayer";
 
 export const INDONESIAN_LOCALE = "id-ID";
 
@@ -10,30 +10,19 @@ export function getDateKey(date = new Date()): string {
 }
 
 export function formatClock(date = new Date()): string {
-  return new Intl.DateTimeFormat(INDONESIAN_LOCALE, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  }).format(date);
+  return new Intl.DateTimeFormat(INDONESIAN_LOCALE, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date);
+}
+
+export function formatHourMinute(date = new Date()): string {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 export function formatIndonesianDate(date = new Date()): string {
-  return new Intl.DateTimeFormat(INDONESIAN_LOCALE, {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric"
-  }).format(date);
+  return new Intl.DateTimeFormat(INDONESIAN_LOCALE, { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(date);
 }
 
 export function formatShortDateTime(date: Date): string {
-  return new Intl.DateTimeFormat(INDONESIAN_LOCALE, {
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
+  return new Intl.DateTimeFormat(INDONESIAN_LOCALE, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
 export function getGreeting(date = new Date()): "Pagi" | "Siang" | "Sore" | "Malam" {
@@ -50,6 +39,15 @@ export function parseTimeToday(time: string, base = new Date()): Date {
   const date = new Date(base);
   date.setHours(Number(hour), Number(minute), 0, 0);
   return date;
+}
+
+export function parseExactLocalTime(hour: number, minute: number, base = new Date()): { date: Date; rolledToTomorrow: boolean } | null {
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  const date = new Date(base);
+  date.setHours(hour, minute, 0, 0);
+  const rolledToTomorrow = date.getTime() <= base.getTime();
+  if (rolledToTomorrow) date.setDate(date.getDate() + 1);
+  return { date, rolledToTomorrow };
 }
 
 export function msToCountdown(ms: number): string {

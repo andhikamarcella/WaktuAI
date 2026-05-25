@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { findNextPrayer, normalizePrayerTimes } from "../lib/prayer";
-import { parseIndonesianTimePhrase } from "../lib/reminders";
+import { parseIndonesianTimePhrase, parseReminderInput } from "../lib/reminders";
 import { formatClock, getGreeting } from "../lib/time";
 import { parseVoiceCommand } from "../lib/voiceCommands";
 import { calculateQiblaBearing } from "../src/lib/qibla";
@@ -32,6 +32,22 @@ describe("time and reminders", () => {
   it("parses Indonesian time phrases", () => {
     const date = parseIndonesianTimePhrase("ingatkan aku jam 7 malam", new Date("2026-05-17T10:00:00"));
     expect(date?.getHours()).toBe(19);
+  });
+  it("parses exact 24-hour reminders without rounding or timezone changes", () => {
+    const parsed = parseReminderInput("ingatkan aku 17:46", new Date("2026-05-17T10:00:00"));
+    expect(parsed?.date.getFullYear()).toBe(2026);
+    expect(parsed?.date.getMonth()).toBe(4);
+    expect(parsed?.date.getDate()).toBe(17);
+    expect(parsed?.date.getHours()).toBe(17);
+    expect(parsed?.date.getMinutes()).toBe(46);
+    expect(parsed?.response).toBe("Siap, aku akan ingatkan jam 17:46.");
+  });
+  it("schedules past exact reminders for tomorrow with clear response", () => {
+    const parsed = parseReminderInput("17:46", new Date("2026-05-17T18:00:00"));
+    expect(parsed?.date.getDate()).toBe(18);
+    expect(parsed?.date.getHours()).toBe(17);
+    expect(parsed?.date.getMinutes()).toBe(46);
+    expect(parsed?.response).toBe("Jam 17:46 hari ini sudah lewat, jadi aku ingatkan besok jam 17:46.");
   });
 });
 

@@ -1,5 +1,5 @@
-import type { QiblaState } from "@/src/hooks/useQibla";
-import { formatCoordinate } from "@/src/lib/qibla";
+import type { QiblaState } from "../hooks/useQibla";
+import { formatCoordinate, type QiblaCity } from "../lib/qibla";
 
 interface QiblaCardProps {
   qibla: QiblaState;
@@ -49,8 +49,8 @@ export default function QiblaCard({ qibla, onManualCityChange }: QiblaCardProps)
       <button className="btn-secondary" onClick={() => { void qibla.enableCompass(); }}>Aktifkan Kompas HP</button>
       <button className="btn-secondary" onClick={qibla.refresh}>Refresh</button>
       <label className="block text-sm font-semibold text-[var(--text)]">Pilih Kota Manual
-        <select className="input mt-1" value={qibla.cities.some((city) => city.name === qibla.city.name) ? qibla.city.name : "Jakarta"} onChange={(event) => { qibla.selectManualCity(event.target.value); onManualCityChange?.(event.target.value); }}>
-          {qibla.cities.map((city) => <option key={city.name} value={city.name}>{city.name}</option>)}
+        <select className="input mt-1" value={qibla.cities.some((city: QiblaCity) => city.name === qibla.city.name) ? qibla.city.name : "Jakarta"} onChange={(event) => { qibla.selectManualCity(event.target.value); onManualCityChange?.(event.target.value); }}>
+          {qibla.cities.map((city: QiblaCity) => <option key={city.name} value={city.name}>{city.name}</option>)}
         </select>
       </label>
     </div>

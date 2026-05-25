@@ -1,6 +1,6 @@
-import type { PrayerName } from "@/types/prayer";
+import type { PrayerName } from "../types/prayer";
 import { CITIES } from "./prayer";
-import { parseIndonesianTimePhrase } from "./reminders";
+import { parseReminderInput } from "./reminders";
 
 export type CommandType =
   | "GET_CURRENT_TIME"
@@ -9,9 +9,17 @@ export type CommandType =
   | "GET_ALL_PRAYER_TIMES"
   | "ENABLE_ADZAN_NOTIFICATION"
   | "DISABLE_ADZAN_NOTIFICATION"
+  | "ENABLE_PRAYER_NOTIFICATIONS"
+  | "DISABLE_PRAYER_NOTIFICATIONS"
+  | "TEST_NOTIFICATION"
+  | "TEST_AI_VOICE"
+  | "ENABLE_STRONG_REMINDER"
+  | "DISABLE_STRONG_REMINDER"
   | "CREATE_REMINDER"
+  | "CREATE_EXACT_TIME_REMINDER"
   | "SET_LOCATION"
   | "SHOW_QIBLA"
+  | "HELP"
   | "ENABLE_DND"
   | "DISABLE_DND"
   | "START_RAKAAT_DETECTION"
@@ -19,6 +27,7 @@ export type CommandType =
   | "RESET_RAKAAT"
   | "INCREMENT_RAKAAT"
   | "DECREMENT_RAKAAT"
+  | "FALLBACK_MANUAL_RAKAAT"
   | "GET_RAKAAT_COUNT"
   | "UNKNOWN";
 
@@ -28,12 +37,13 @@ export interface ParsedCommand {
   prayerName?: PrayerName;
   reminderAt?: Date;
   reminderLabel?: string;
+  reminderResponse?: string;
   leadMinutes?: 0 | 5 | 10 | 15;
   cityName?: string;
   dndMinutes?: number;
 }
 
-export const UNKNOWN_RESPONSE = "Maaf, aku belum paham perintah itu. Coba bilang: jam berapa sekarang, jadwal sholat hari ini, atau kapan adzan Maghrib.";
+export const UNKNOWN_RESPONSE = "Aku belum paham perintah itu. Coba tombol saran di bawah, atau buka Bantuan.";
 
 const prayerAliases: Array<[PrayerName, RegExp]> = [
   ["Subuh", /\b(subuh|fajr)\b/],
@@ -44,7 +54,7 @@ const prayerAliases: Array<[PrayerName, RegExp]> = [
 ];
 
 function normalize(text: string): string {
-  return text.toLowerCase().normalize("NFKD").replace(/[?!.:,]/g, " ").replace(/\s+/g, " ").trim();
+  return text.toLowerCase().normalize("NFKD").replace(/[?!,]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 export function detectPrayerName(text: string): PrayerName | undefined {
@@ -64,6 +74,15 @@ export function parseVoiceCommand(input: string, base = new Date()): ParsedComma
   const text = normalize(raw);
   if (!text) return { type: "UNKNOWN", raw };
 
+  if (/(aku bingung|cara pakainya gimana|ini buat apa|bisa apa aja|tolong jelasin|command apa aja|aku ga ngerti|aku nggak ngerti|bantuan|help)/.test(text)) return { type: "HELP", raw };
+  if (/(tes notifikasi|kirim notifikasi tes)/.test(text)) return { type: "TEST_NOTIFICATION", raw };
+  if (/(tes suara|tes suara ai)/.test(text)) return { type: "TEST_AI_VOICE", raw };
+  if (/(aktifkan|nyalain|hidupkan).*(notifikasi sholat|notifikasi adzan|notif sholat)/.test(text)) return { type: "ENABLE_PRAYER_NOTIFICATIONS", raw, prayerName: detectPrayerName(text) };
+  if (/(matikan|nonaktif|off).*(notifikasi sholat|notifikasi adzan|notif sholat)/.test(text)) return { type: "DISABLE_PRAYER_NOTIFICATIONS", raw, prayerName: detectPrayerName(text) };
+  if (/(aktifkan pengingat kuat|pengingatnya yang sering|pengingat kuat)/.test(text)) return { type: "ENABLE_STRONG_REMINDER", raw };
+  if (/(matikan pengingat berulang|pengingat berulang off)/.test(text)) return { type: "DISABLE_STRONG_REMINDER", raw };
+  if (/(kamera tidak bisa|pakai hitung manual|hitung manual)/.test(text)) return { type: "FALLBACK_MANUAL_RAKAAT", raw };
+
   const city = CITIES.find((c) => new RegExp(`\\b${c.name.toLowerCase()}\\b`).test(text));
   if (city && /(ganti|ubah|pakai|gunakan|lokasi|kota)/.test(text)) return { type: "SET_LOCATION", raw, cityName: city.name };
 
@@ -80,13 +99,15 @@ export function parseVoiceCommand(input: string, base = new Date()): ParsedComma
 
   if (/(notifikasi|notif|pengingat)/.test(text) && /(matikan|matiin|nonaktif|off)/.test(text)) return { type: "DISABLE_ADZAN_NOTIFICATION", raw, prayerName };
   if (/(notifikasi|notif|pengingat)/.test(text) && /(aktifkan|nyalain|hidupkan|on)/.test(text)) return { type: "ENABLE_ADZAN_NOTIFICATION", raw, prayerName, leadMinutes };
-
-  if (/(ingatkan|reminder|bangunin|kasih tahu)/.test(text)) {
-    if (leadMinutes !== undefined && prayerName) return { type: "ENABLE_ADZAN_NOTIFICATION", raw, prayerName, leadMinutes };
-    const reminderAt = parseIndonesianTimePhrase(text, base);
-    if (reminderAt) return { type: "CREATE_REMINDER", raw, reminderAt, reminderLabel: `Reminder: ${raw}` };
-    if (prayerName) return { type: "CREATE_REMINDER", raw, prayerName, reminderLabel: `Ingatkan sholat ${prayerName}` };
+  if (prayerName && leadMinutes !== undefined && /(ingatkan|pengingat|reminder|notifikasi|notif)/.test(text)) {
+    return { type: "ENABLE_ADZAN_NOTIFICATION", raw, prayerName, leadMinutes };
   }
+
+  const reminder = parseReminderInput(text, base);
+  if (reminder && (/^(\d{1,2})[:.](\d{2})$/.test(text) || /(ingatkan|reminder|bangunin|\bjam\b)/.test(text))) {
+    return { type: /\d{1,2}[:.]\d{2}/.test(text) ? "CREATE_EXACT_TIME_REMINDER" : "CREATE_REMINDER", raw, reminderAt: reminder.date, reminderLabel: reminder.label, reminderResponse: reminder.response };
+  }
+  if (/(ingatkan|reminder|bangunin|kasih tahu)/.test(text) && prayerName) return { type: "CREATE_REMINDER", raw, prayerName, reminderLabel: `Ingatkan sholat ${prayerName}` };
 
   if (/(mulai|start|aktifkan).*(deteksi )?rakaat/.test(text)) return { type: "START_RAKAAT_DETECTION", raw };
   if (/(stop|berhenti|matikan).*(deteksi )?rakaat/.test(text)) return { type: "STOP_RAKAAT_DETECTION", raw };

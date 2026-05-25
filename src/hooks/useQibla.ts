@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CityOption } from "@/types/prayer";
-import { calculateCompassArrowRotation, calculateQiblaBearing, DEFAULT_QIBLA_CITY, QIBLA_CITIES, type QiblaCity } from "@/src/lib/qibla";
+import { calculateCompassArrowRotation, calculateQiblaBearing, DEFAULT_QIBLA_CITY, QIBLA_CITIES, type QiblaCity } from "../lib/qibla";
+
+export interface CityOption {
+  name: string;
+  latitude: number;
+  longitude: number;
+}
 
 type QiblaLocationSource = "GPS" | "Kota manual" | "Default Jakarta";
 type CompassStatus = "Kompas aktif" | "Kompas belum aktif" | "Kompas tidak didukung" | "Izin kompas ditolak";
@@ -143,14 +148,14 @@ export function useQibla(currentCity?: CityOption | null): QiblaState {
   }, []);
 
   const selectManualCity = useCallback((cityName: string) => {
-    const selected = QIBLA_CITIES.find((item) => item.name === cityName) ?? DEFAULT_QIBLA_CITY;
+    const selected = QIBLA_CITIES.find((item: QiblaCity) => item.name === cityName) ?? DEFAULT_QIBLA_CITY;
     setCity(selected);
     setLocationSource("Kota manual");
     setLocationError(null);
   }, []);
 
   const refresh = useCallback(() => {
-    setCity((current) => ({ ...current }));
+    setCity((current: QiblaCity) => ({ ...current }));
     setLocationError(null);
   }, []);
 

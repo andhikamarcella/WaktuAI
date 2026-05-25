@@ -1,4 +1,4 @@
-import type { PoseLandmark, RakaatCounterState, RakaatDetectionThresholds, RakaatPosture, RakaatTransitionResult } from "@/src/types/rakaat";
+import type { PoseLandmark, RakaatCounterState, RakaatDetectionThresholds, RakaatPosture, RakaatTransitionResult } from "../types/rakaat";
 
 export const RAKAAT_SEQUENCE = ["Berdiri", "Rukuk", "Sujud 1", "Duduk", "Sujud 2", "Berdiri lagi"] as const;
 
