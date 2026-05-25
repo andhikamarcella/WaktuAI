@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AdzanAudioSettings, playSelectedAdzanSound } from "../lib/adzanAudio";
 import { Reminder, nextRepeatDate } from "../lib/reminders";
 import { dateAtLocalTime, localDateKey, parseClockTime } from "../lib/time";
 
@@ -58,6 +59,8 @@ interface SchedulerArgs {
   notifications: WebNotificationSettings;
   voice: VoiceSettings;
   dnd: DndSettings;
+  adzanAudio: AdzanAudioSettings;
+  audioUnlocked: boolean;
   completedPrayers: Record<string, PrayerName[]>;
   reminders: Reminder[];
   onSetReminders: (updater: (items: Reminder[]) => Reminder[]) => void;
@@ -65,6 +68,7 @@ interface SchedulerArgs {
   onPrayerBanner: (banner: PrayerBanner) => void;
   onReminderBanner: (banner: FiredReminderBanner) => void;
   onLog: (item: Omit<HistoryLog, "id" | "time">) => void;
+  onAdzanAudioResult: (settings: AdzanAudioSettings) => void;
 }
 
 const sentStorageKey = "waktuai.sentNotificationKeys";
@@ -134,6 +138,8 @@ export function usePrayerNotificationScheduler(args: SchedulerArgs) {
     notifications,
     voice,
     dnd,
+    adzanAudio,
+    audioUnlocked,
     completedPrayers,
     reminders,
     onSetReminders,
@@ -141,6 +147,7 @@ export function usePrayerNotificationScheduler(args: SchedulerArgs) {
     onPrayerBanner,
     onReminderBanner,
     onLog,
+    onAdzanAudioResult,
   } = args;
   const [schedulerStatus, setSchedulerStatus] = useState<"running" | "paused">("running");
   const [lastCheckAt, setLastCheckAt] = useState<string | null>(null);
@@ -205,7 +212,33 @@ export function usePrayerNotificationScheduler(args: SchedulerArgs) {
           message: isPre ? `Sebentar lagi ${prayer.name}. Siapkan wudhu dan sholat.` : `Sudah masuk waktu ${prayer.name}`,
           dateKey,
         });
-        const didSpeak = speak(isPre ? `Sebentar lagi waktu ${prayer.name}.` : `Sudah masuk waktu ${prayer.name}. Yuk sholat.`, current.voice, "prayer");
+        const soundKey = `${dateKey}-${prayer.name}-adzan-sound`;
+        const shouldTryAdzanSound = offset <= 0 && !sentSet.has(soundKey);
+        const shouldTryPreparationSound = offset < 0;
+        if (shouldTryAdzanSound || shouldTryPreparationSound) {
+          void playSelectedAdzanSound({
+            prayerName: prayer.name,
+            mode: isPre ? "preReminder" : "time",
+            settings: current.adzanAudio,
+          }).then((result) => {
+            current.onAdzanAudioResult({
+              ...current.adzanAudio,
+              lastTestResult: result.ok ? `Suara adzan: ${result.source ?? "audio"} berhasil.` : result.reason ?? "Suara adzan gagal.",
+              lastPlayedAt: result.ok ? new Date().toISOString() : current.adzanAudio.lastPlayedAt,
+              lastFailedReason: result.ok ? undefined : result.reason,
+            });
+            current.onLog({
+              type: "audio",
+              title: `${prayer.name} adzan sound`,
+              status: result.ok ? "success" : "failed",
+              reason: result.reason ?? result.source ?? (current.audioUnlocked ? "Audio attempted" : "Audio attempted before unlock"),
+            });
+          });
+          if (shouldTryAdzanSound) sentSet.add(soundKey);
+        }
+        const didSpeak = current.adzanAudio.source === "voice" && current.adzanAudio.enabled
+          ? false
+          : speak(isPre ? `Sebentar lagi waktu ${prayer.name}.` : `Sudah masuk waktu ${prayer.name}. Yuk sholat.`, current.voice, "prayer");
         sentSet.add(key);
         current.onLog({
           type: "prayer",

@@ -60,11 +60,11 @@ textarea {
 
 @layer components {
   .card {
-    @apply rounded-2xl border border-line bg-panel p-4 shadow-soft;
+    @apply w-full min-w-0 rounded-2xl border border-line bg-panel p-4 shadow-soft transition-transform duration-200;
   }
 
   .btn {
-    @apply inline-flex min-h-11 items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex min-h-11 min-w-0 items-center justify-center whitespace-normal rounded-xl px-3 py-2 text-center text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .btn-primary {
@@ -80,6 +80,12 @@ textarea {
   }
 
   .input {
-    @apply min-h-11 w-full rounded-xl border border-line bg-panel px-3 py-2 text-base text-ink placeholder:text-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20;
+    @apply min-h-11 w-full min-w-0 rounded-xl border border-line bg-panel px-3 py-2 text-base text-ink placeholder:text-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .card:hover {
+    transform: translateY(-1px);
   }
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AdzanSoundSettings } from "./components/AdzanSoundSettings";
 import {
   DndSettings,
   HistoryLog,
@@ -10,6 +11,7 @@ import {
   WebNotificationSettings,
   usePrayerNotificationScheduler,
 } from "./hooks/usePrayerNotificationScheduler";
+import { AdzanAudioSettings, defaultAdzanAudioSettings } from "./lib/adzanAudio";
 import { Reminder, RepeatRule, parseReminderInput } from "./lib/reminders";
 import { TimeFormat, clampNumber, displayDate, durationText, formatClock, formatDateTime, localDateKey, parseClockTime } from "./lib/time";
 import { parseCommand, suggestedCommands } from "./lib/voiceCommands";
@@ -20,6 +22,8 @@ type ToastTone = "success" | "error" | "info";
 type LocationSource = "GPS" | "Manual city" | "Default Jakarta";
 type CameraStatus = "idle" | "requesting" | "active" | "denied" | "unavailable" | "model-unavailable" | "insecure";
 type NotificationPermissionState = "unsupported" | NotificationPermission;
+type WidgetKey = "time" | "nextPrayer" | "countdown" | "qibla" | "progress" | "reminders" | "tasbih" | "note" | "notification" | "voice";
+type ReminderTone = "soft" | "neutral" | "firm";
 
 interface Toast {
   id: string;
@@ -65,9 +69,38 @@ interface DailyNote {
   done: boolean;
 }
 
+interface DailyChecklistItem {
+  id: string;
+  text: string;
+  custom: boolean;
+  done: boolean;
+}
+
+interface CommandHistoryItem {
+  id: string;
+  command: string;
+  intent: string;
+  response: string;
+  status: "success" | "error";
+  time: string;
+}
+
+interface PrayerAdjustments {
+  Subuh: number;
+  Dzuhur: number;
+  Ashar: number;
+  Maghrib: number;
+  Isya: number;
+}
+
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
+interface WakeLockSentinel extends EventTarget {
+  released: boolean;
+  release: () => Promise<void>;
 }
 
 const prayerNames: PrayerName[] = ["Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"];
@@ -97,6 +130,22 @@ const methodOptions = [
 ];
 
 const defaultQuickActions = ["Jadwal Sholat", "Adzan Berikutnya", "Tambah Reminder", "Arah Kiblat", "Tes Notifikasi", "Hitung Rakaat", "Tasbih"];
+const defaultWidgets: WidgetKey[] = ["time", "nextPrayer", "countdown", "qibla", "progress", "reminders"];
+const widgetLabels: Record<WidgetKey, string> = {
+  time: "Current time",
+  nextPrayer: "Next prayer",
+  countdown: "Countdown",
+  qibla: "Qibla degree",
+  progress: "Prayer progress",
+  reminders: "Active reminders",
+  tasbih: "Tasbih progress",
+  note: "Daily note",
+  notification: "Notification status",
+  voice: "Voice AI status",
+};
+const defaultChecklistTexts = ["Sholat Subuh", "Sholat Dzuhur", "Sholat Ashar", "Sholat Maghrib", "Sholat Isya", "Dzikir pagi", "Dzikir petang", "Baca Al-Qur'an", "Sedekah", "Catatan harian"];
+const defaultPrayerAdjustments: PrayerAdjustments = { Subuh: 0, Dzuhur: 0, Ashar: 0, Maghrib: 0, Isya: 0 };
+const commandSuggestions = ["jam berapa sekarang", "jadwal sholat hari ini", "kapan isya", "ingatkan aku 17:46", "arah kiblat", "tes notifikasi", "tes suara ai", "hitung tasbih", "tambah rakaat", "aku bingung"];
 
 function safeRead<T>(key: string, fallback: T): T {
   try {
@@ -160,6 +209,14 @@ function cleanTiming(value: string | undefined): string | null {
   if (!value) return null;
   const parsed = parseClockTime(value);
   return parsed ? `${String(parsed.hour).padStart(2, "0")}:${String(parsed.minute).padStart(2, "0")}` : null;
+}
+
+function adjustPrayerTime(time: string, minutes: number): string {
+  const parsed = parseClockTime(time);
+  if (!parsed || minutes === 0) return time;
+  const date = new Date();
+  date.setHours(parsed.hour, parsed.minute + minutes, 0, 0);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 function getNotificationPermission(): NotificationPermissionState {
@@ -245,6 +302,8 @@ export default function App() {
     reminder: true,
     rate: "normal",
   });
+  const [adzanAudio, setAdzanAudio] = useStoredState<AdzanAudioSettings>("waktuai.adzanAudio", defaultAdzanAudioSettings);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [dnd, setDnd] = useStoredState<DndSettings>("waktuai.dnd", { enabled: false, until: null });
   const [reminders, setReminders] = useStoredState<Reminder[]>("waktuai.reminders", []);
   const [tracker, setTracker] = useStoredState<PrayerTracker>("waktuai.prayerTracker", {});
@@ -252,6 +311,14 @@ export default function App() {
   const [notes, setNotes] = useStoredState<Record<string, DailyNote[]>>("waktuai.dailyNotes", {});
   const [history, setHistory] = useStoredState<HistoryLog[]>("waktuai.history", []);
   const [quickActions, setQuickActions] = useStoredState<string[]>("waktuai.quickActions", defaultQuickActions);
+  const [dashboardWidgets, setDashboardWidgets] = useStoredState<WidgetKey[]>("waktuai.dashboardWidgets", defaultWidgets);
+  const [checklists, setChecklists] = useStoredState<Record<string, DailyChecklistItem[]>>("waktuai.dailyChecklist", {});
+  const [commandHistory, setCommandHistory] = useStoredState<CommandHistoryItem[]>("waktuai.commandHistory", []);
+  const [prayerAdjustments, setPrayerAdjustments] = useStoredState<PrayerAdjustments>("waktuai.prayerAdjustments", defaultPrayerAdjustments);
+  const [quranReminder, setQuranReminder] = useStoredState("waktuai.quranReminder", { enabled: false, time: "20:00" });
+  const [reminderTone, setReminderTone] = useStoredState<ReminderTone>("waktuai.reminderTone", "neutral");
+  const [wakeLockStatus, setWakeLockStatus] = useState<"off" | "active" | "unsupported" | "paused">("off");
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const [safeMode, setSafeMode] = useStoredState<boolean>("waktuai.safeMode", false);
   const [onboardingDone, setOnboardingDone] = useStoredState<boolean>("waktuai.onboardingDone", false);
   const [dismissedTips, setDismissedTips] = useStoredState<string[]>("waktuai.dismissedTips", []);
@@ -334,10 +401,18 @@ export default function App() {
     }
   }, [clock, dnd, setDnd]);
 
+  const adjustedSchedule = useMemo<PrayerSchedule | null>(() => {
+    if (!schedule) return null;
+    return {
+      ...schedule,
+      timings: Object.fromEntries(prayerNames.map((name) => [name, adjustPrayerTime(schedule.timings[name], prayerAdjustments[name] ?? 0)])) as Record<PrayerName, string>,
+    };
+  }, [prayerAdjustments, schedule]);
+
   const prayerTimes = useMemo<PrayerTime[]>(() => {
-    if (!schedule) return [];
-    return prayerNames.map((name) => ({ name, time: schedule.timings[name] })).filter((item) => Boolean(item.time));
-  }, [schedule]);
+    if (!adjustedSchedule) return [];
+    return prayerNames.map((name) => ({ name, time: adjustedSchedule.timings[name] })).filter((item) => Boolean(item.time));
+  }, [adjustedSchedule]);
 
   const todayKey = localDateKey(clock);
   const completedToday = tracker[todayKey] ?? [];
@@ -426,6 +501,8 @@ export default function App() {
     notifications,
     voice,
     dnd,
+    adzanAudio,
+    audioUnlocked,
     completedPrayers: tracker,
     reminders,
     onSetReminders: setReminders,
@@ -433,6 +510,7 @@ export default function App() {
     onPrayerBanner: setPrayerBanner,
     onReminderBanner: setReminderBanner,
     onLog: addLog,
+    onAdzanAudioResult: setAdzanAudio,
   });
 
   useEffect(() => {
@@ -528,6 +606,43 @@ export default function App() {
     }
   };
 
+  const toggleWakeLock = async () => {
+    if (wakeLockRef.current) {
+      await wakeLockRef.current.release().catch(() => undefined);
+      wakeLockRef.current = null;
+      setWakeLockStatus("off");
+      return;
+    }
+    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinel> } }).wakeLock;
+    if (!wakeLock) {
+      setWakeLockStatus("unsupported");
+      addToast("Wake Lock belum didukung browser ini.", "info");
+      return;
+    }
+    try {
+      const sentinel = await wakeLock.request("screen");
+      wakeLockRef.current = sentinel;
+      setWakeLockStatus("active");
+      sentinel.addEventListener("release", () => setWakeLockStatus(document.visibilityState === "visible" ? "off" : "paused"));
+      addToast("Layar akan dijaga tetap menyala selama tab aktif.", "success");
+    } catch {
+      setWakeLockStatus("paused");
+      addToast("Wake Lock tidak bisa diaktifkan. Browser mungkin membatasi fitur ini.", "error");
+    }
+  };
+
+  useEffect(() => {
+    const restoreWakeLock = () => {
+      if (document.visibilityState !== "visible" || wakeLockStatus !== "paused") return;
+      void toggleWakeLock();
+    };
+    document.addEventListener("visibilitychange", restoreWakeLock);
+    return () => {
+      document.removeEventListener("visibilitychange", restoreWakeLock);
+      void wakeLockRef.current?.release().catch(() => undefined);
+    };
+  }, [wakeLockStatus]);
+
   const markPrayerDone = (name: PrayerName) => {
     setTracker((current) => {
       const existing = current[todayKey] ?? [];
@@ -557,7 +672,38 @@ export default function App() {
   };
 
   const addReminderFromText = (text: string) => {
-    const parsed = parseReminderInput(text, new Date(), schedule?.timings ?? {}, timeFormat);
+    if (/bangunin.*subuh|alarm subuh|sebelum subuh/.test(text.toLowerCase())) {
+      const subuh = adjustedSchedule?.timings.Subuh;
+      const parsedSubuh = subuh ? parseClockTime(subuh) : null;
+      if (!parsedSubuh) {
+        addToast("Jadwal Subuh belum tersedia. Muat jadwal atau pilih kota dulu.", "error");
+        return;
+      }
+      const offsetMatch = text.match(/(\d+)\s*menit/);
+      const offset = offsetMatch ? Number(offsetMatch[1]) : 30;
+      const date = new Date();
+      date.setHours(parsedSubuh.hour, parsedSubuh.minute - offset, 0, 0);
+      if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1);
+      const reminder: Reminder = {
+        id: `${Date.now()}-subuh-wakeup`,
+        title: `Bangunin ${offset} menit sebelum Subuh`,
+        dateTime: date.toISOString(),
+        status: "scheduled",
+        createdAt: new Date().toISOString(),
+        repeat: "once",
+        firedKeys: [],
+        snoozeCount: 0,
+        alarmMode: true,
+        repeatCount: 0,
+        done: false,
+        history: ["Bangun Subuh dijadwalkan"],
+      };
+      setReminders((items) => [reminder, ...items]);
+      setAssistantReply(`Siap, aku akan ingatkan ${offset} menit sebelum Subuh.`);
+      addToast(`Reminder Subuh dibuat ${offset} menit sebelumnya.`, "success");
+      return;
+    }
+    const parsed = parseReminderInput(text, new Date(), adjustedSchedule?.timings ?? {}, timeFormat);
     if (!parsed) {
       addToast("Aku belum paham waktu reminder itu. Coba: ingatkan aku 17:46.", "error");
       return;
@@ -720,12 +866,16 @@ export default function App() {
 
   const handleCommand = (text = command) => {
     const parsed = parseCommand(text);
+    let commandResponse = "Perintah dijalankan.";
+    let commandStatus: CommandHistoryItem["status"] = "success";
     setTroubleshootTopic(null);
     if (parsed.intent === "HELP") {
-      setAssistantReply("Tenang, aku bantu. Kamu bisa tanya jam, jadwal sholat, arah kiblat, buat reminder, aktifkan notifikasi, hitung rakaat, dan pakai tasbih.");
+      commandResponse = "Tenang, aku bantu. Kamu bisa tanya jam, jadwal sholat, arah kiblat, buat reminder, aktifkan notifikasi, hitung rakaat, dan pakai tasbih.";
+      setAssistantReply(commandResponse);
     } else if (parsed.intent === "TROUBLESHOOT") {
       setTroubleshootTopic(parsed.text);
-      setAssistantReply("Aku bantu cek pelan-pelan. Pilih tombol diagnostik yang sesuai.");
+      commandResponse = "Aku bantu cek pelan-pelan. Pilih tombol diagnostik yang sesuai.";
+      setAssistantReply(commandResponse);
     } else if (parsed.intent === "TEST_NOTIFICATION") sendTestNotification();
     else if (parsed.intent === "TEST_AI_VOICE") testVoice();
     else if (parsed.intent === "ENABLE_PRAYER_NOTIFICATIONS") requestNotificationPermission();
@@ -757,12 +907,22 @@ export default function App() {
       stopCamera();
       addToast("Mode aman aktif. Kamera, suara otomatis, dan pengingat kuat dimatikan.", "success");
     } else if (parsed.intent === "NEXT_PRAYER") {
-      setAssistantReply(nextPrayer ? `Berikutnya ${nextPrayer.name} jam ${formatClock(nextPrayer.date, timeFormat)}, ${durationText(nextPrayer.date.getTime() - clock.getTime())} lagi.` : "Jadwal belum dimuat.");
+      commandResponse = nextPrayer ? `Berikutnya ${nextPrayer.name} jam ${formatClock(nextPrayer.date, timeFormat)}, ${durationText(nextPrayer.date.getTime() - clock.getTime())} lagi.` : "Jadwal belum dimuat.";
+      setAssistantReply(commandResponse);
     } else if (parsed.intent === "PRAYER_TIME") {
       const found = prayerTimes.find((item) => parsed.text.includes(item.name.toLowerCase()));
-      setAssistantReply(found ? `${found.name} jam ${formatClock(found.time, timeFormat)}.` : "Jadwal belum dimuat.");
+      commandResponse = found ? `${found.name} jam ${formatClock(found.time, timeFormat)}.` : "Jadwal belum dimuat.";
+      setAssistantReply(commandResponse);
     } else {
-      setAssistantReply(`Aku belum paham perintah itu. Coba: ${suggestedCommands.join(", ")}.`);
+      commandStatus = "error";
+      commandResponse = `Aku belum paham perintah itu. Coba: ${suggestedCommands.join(", ")}.`;
+      setAssistantReply(commandResponse);
+    }
+    if (text.trim()) {
+      setCommandHistory((items) => [
+        { id: `${Date.now()}`, command: text.trim(), intent: parsed.intent, response: commandResponse, status: commandStatus, time: new Date().toISOString() },
+        ...items,
+      ].slice(0, 20));
     }
     setCommand("");
   };
@@ -875,7 +1035,7 @@ export default function App() {
           <HomeTab
             clock={clock}
             nextPrayer={nextPrayer}
-            schedule={schedule}
+            schedule={adjustedSchedule}
             scheduleStatus={scheduleStatus}
             completedToday={completedToday}
             reminders={reminders}
@@ -902,12 +1062,22 @@ export default function App() {
             testVoice={testVoice}
             sendTestNotification={sendTestNotification}
             requestGps={requestGps}
+            dashboardWidgets={dashboardWidgets}
+            checklists={checklists}
+            setChecklists={setChecklists}
+            tasbih={tasbih}
+            wakeLockStatus={wakeLockStatus}
+            toggleWakeLock={toggleWakeLock}
+            notificationEnabled={notifications.enabled}
+            preReminder={notifications.preReminder}
+            commandHistory={commandHistory}
+            clearCommandHistory={() => setCommandHistory([])}
           />
         ) : null}
 
         {activeTab === "prayer" ? (
           <PrayerTab
-            schedule={schedule}
+            schedule={adjustedSchedule}
             scheduleStatus={scheduleStatus}
             fetchPrayerSchedule={fetchPrayerSchedule}
             completedToday={completedToday}
@@ -925,6 +1095,7 @@ export default function App() {
             tasbih={tasbih}
             setTasbih={setTasbih}
             timeFormat={timeFormat}
+            clock={clock}
           />
         ) : null}
 
@@ -944,6 +1115,8 @@ export default function App() {
             addDailyNote={addDailyNote}
             setNotes={setNotes}
             todayKey={todayKey}
+            quranReminder={quranReminder}
+            setQuranReminder={setQuranReminder}
           />
         ) : null}
 
@@ -975,6 +1148,10 @@ export default function App() {
             setNotifications={setNotifications}
             voice={voice}
             setVoice={setVoice}
+            adzanAudio={adzanAudio}
+            setAdzanAudio={setAdzanAudio}
+            audioUnlocked={audioUnlocked}
+            setAudioUnlocked={setAudioUnlocked}
             playBeep={playBeep}
             coords={coords}
             requestGps={requestGps}
@@ -1005,6 +1182,14 @@ export default function App() {
             setReminders={setReminders}
             setTracker={setTracker}
             setCoords={setCoords}
+            dashboardWidgets={dashboardWidgets}
+            setDashboardWidgets={setDashboardWidgets}
+            prayerAdjustments={prayerAdjustments}
+            setPrayerAdjustments={setPrayerAdjustments}
+            commandHistory={commandHistory}
+            setCommandHistory={setCommandHistory}
+            reminderTone={reminderTone}
+            setReminderTone={setReminderTone}
           />
         ) : null}
       </main>
@@ -1090,9 +1275,23 @@ function HomeTab(props: {
   testVoice: () => void;
   sendTestNotification: () => void;
   requestGps: () => void;
+  dashboardWidgets: WidgetKey[];
+  checklists: Record<string, DailyChecklistItem[]>;
+  setChecklists: React.Dispatch<React.SetStateAction<Record<string, DailyChecklistItem[]>>>;
+  tasbih: TasbihState;
+  wakeLockStatus: "off" | "active" | "unsupported" | "paused";
+  toggleWakeLock: () => void;
+  notificationEnabled: boolean;
+  preReminder: 0 | 5 | 10 | 15;
+  commandHistory: CommandHistoryItem[];
+  clearCommandHistory: () => void;
 }) {
   const next = props.nextPrayer;
   const progress = props.completedToday.length;
+  const [selectedSuggestion, setSelectedSuggestion] = useState(0);
+  const filteredSuggestions = commandSuggestions
+    .filter((item) => item.includes(props.command.toLowerCase()) || props.command.trim().length < 2)
+    .slice(0, 5);
   const tip = [
     "Kamu bisa ketik: ingatkan aku 17:46",
     "Tekan Tes Notifikasi untuk memastikan alarm aktif.",
@@ -1126,6 +1325,49 @@ function HomeTab(props: {
           </div>
         )}
       </section>
+
+      <LockscreenPrayerCard
+        clock={props.clock}
+        nextPrayer={next}
+        city={props.schedule?.city ?? "Jakarta"}
+        notificationStatus={props.notificationStatus}
+        wakeLockStatus={props.wakeLockStatus}
+        toggleWakeLock={props.toggleWakeLock}
+        timeFormat={props.timeFormat}
+      />
+
+      <PrayerReadinessCard
+        scheduleLoaded={Boolean(props.schedule)}
+        notificationEnabled={props.notificationEnabled}
+        preReminder={props.preReminder}
+        locationSource={props.schedule?.source ?? "Default Jakarta"}
+        voiceEnabled={props.voice.enabled}
+        hasNextPrayer={Boolean(next)}
+        requestNotificationPermission={props.requestNotificationPermission}
+        testVoice={props.testVoice}
+        sendTestNotification={props.sendTestNotification}
+        openSettings={() => props.setActiveTab("settings")}
+      />
+
+      <DashboardWidgets
+        enabled={props.dashboardWidgets}
+        clock={props.clock}
+        nextPrayer={next}
+        qibla={props.qibla}
+        completedCount={progress}
+        reminders={props.reminders}
+        tasbih={props.tasbih}
+        notes={[]}
+        notificationStatus={props.notificationStatus}
+        voiceEnabled={props.voice.enabled}
+        timeFormat={props.timeFormat}
+      />
+
+      <DailyChecklistCard
+        dateKey={localDateKey(props.clock)}
+        itemsByDate={props.checklists}
+        setItemsByDate={props.setChecklists}
+      />
 
       <section className="card">
         <SectionTitle title="Ringkasan Hari Ini" subtitle={props.dailyReminderText} />
@@ -1171,9 +1413,41 @@ function HomeTab(props: {
             props.handleCommand();
           }}
         >
-          <input className="input" value={props.command} onChange={(event) => props.setCommand(event.target.value)} placeholder="Contoh: ingatkan aku 17:46" aria-label="Perintah WaktuAI" />
+          <input
+            className="input"
+            value={props.command}
+            onChange={(event) => props.setCommand(event.target.value)}
+            onKeyDown={(event) => {
+              if (!filteredSuggestions.length) return;
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setSelectedSuggestion((item) => (item + 1) % filteredSuggestions.length);
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelectedSuggestion((item) => (item - 1 + filteredSuggestions.length) % filteredSuggestions.length);
+              } else if (event.key === "Enter" && props.command.trim().length === 0) {
+                event.preventDefault();
+                props.handleCommand(filteredSuggestions[selectedSuggestion]);
+              } else if (event.key === "Escape") {
+                props.setCommand("");
+              }
+            }}
+            placeholder="Contoh: ingatkan aku 17:46"
+            aria-label="Perintah WaktuAI"
+          />
           <Button variant="primary" type="submit">Kirim</Button>
         </form>
+        <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+          {filteredSuggestions.map((item, index) => (
+            <button
+              key={item}
+              className={`shrink-0 rounded-full border px-3 py-2 text-sm font-semibold ${index === selectedSuggestion ? "border-brand bg-brandSoft text-teal-950 dark:text-teal-50" : "border-line bg-page text-ink"}`}
+              onClick={() => props.handleCommand(item)}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
         {props.assistantReply ? <p className="mt-3 rounded-xl bg-brandSoft p-3 text-sm font-semibold text-teal-950 dark:text-teal-50">{props.assistantReply}</p> : null}
         {props.troubleshootTopic ? (
           <TroubleshootingCards
@@ -1186,6 +1460,7 @@ function HomeTab(props: {
           />
         ) : null}
         <CommandCenter runCommand={props.handleCommand} />
+        <CommandHistory history={props.commandHistory} runCommand={props.handleCommand} clearHistory={props.clearCommandHistory} timeFormat={props.timeFormat} />
       </section>
 
       <section className="card">
@@ -1218,6 +1493,172 @@ function StatusItem({ label, value }: { label: string; value: string }) {
   );
 }
 
+function LockscreenPrayerCard(props: {
+  clock: Date;
+  nextPrayer: (PrayerTime & { date: Date }) | null;
+  city: string;
+  notificationStatus: string;
+  wakeLockStatus: "off" | "active" | "unsupported" | "paused";
+  toggleWakeLock: () => void;
+  timeFormat: TimeFormat;
+}) {
+  const requestFullscreen = () => {
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+      void document.documentElement.requestFullscreen();
+    } else if (document.exitFullscreen) {
+      void document.exitFullscreen();
+    }
+  };
+  return (
+    <section className="card bg-slate-950 text-white">
+      <div className="text-center">
+        <p className="text-5xl font-black">{formatClock(props.clock, props.timeFormat)}</p>
+        <p className="mt-3 text-sm font-semibold text-slate-300">{props.city} - notifikasi {props.notificationStatus}</p>
+        <p className="mt-5 text-lg font-bold">{props.nextPrayer ? `Menuju ${props.nextPrayer.name}` : "Jadwal belum dimuat"}</p>
+        <p className="mt-1 text-4xl font-black text-teal-200">{props.nextPrayer ? durationText(props.nextPrayer.date.getTime() - props.clock.getTime()) : "--:--:--"}</p>
+      </div>
+      <div className="mt-5 grid grid-cols-2 gap-2">
+        <Button className="border-white/20 bg-white/10 text-white" onClick={requestFullscreen}>{document.fullscreenElement ? "Keluar Fullscreen" : "Fullscreen"}</Button>
+        <Button className="border-white/20 bg-white/10 text-white" onClick={props.toggleWakeLock}>Wake Lock: {props.wakeLockStatus === "active" ? "Aktif" : props.wakeLockStatus === "unsupported" ? "Tidak didukung" : "Off"}</Button>
+      </div>
+    </section>
+  );
+}
+
+function PrayerReadinessCard(props: {
+  scheduleLoaded: boolean;
+  notificationEnabled: boolean;
+  preReminder: 0 | 5 | 10 | 15;
+  locationSource: string;
+  voiceEnabled: boolean;
+  hasNextPrayer: boolean;
+  requestNotificationPermission: () => void;
+  testVoice: () => void;
+  sendTestNotification: () => void;
+  openSettings: () => void;
+}) {
+  const checks = [
+    props.notificationEnabled,
+    props.preReminder > 0,
+    props.scheduleLoaded,
+    Boolean(props.locationSource),
+    props.voiceEnabled,
+    props.hasNextPrayer,
+  ];
+  const score = Math.round((checks.filter(Boolean).length / checks.length) * 100);
+  return (
+    <section className="card">
+      <SectionTitle title={`Kesiapan pengingat: ${score}%`} subtitle="Berdasarkan status jadwal, lokasi, notifikasi, pre-reminder, suara, dan countdown." />
+      <div className="h-3 overflow-hidden rounded-full bg-line"><div className="h-full bg-brand" style={{ width: `${score}%` }} /></div>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        {!props.notificationEnabled ? <Button onClick={props.requestNotificationPermission}>Aktifkan notifikasi</Button> : null}
+        {!props.voiceEnabled ? <Button onClick={props.testVoice}>Tes suara AI</Button> : null}
+        <Button onClick={props.sendTestNotification}>Tes notifikasi</Button>
+        <Button onClick={props.openSettings}>Buka pengaturan</Button>
+      </div>
+    </section>
+  );
+}
+
+function DashboardWidgets(props: {
+  enabled: WidgetKey[];
+  clock: Date;
+  nextPrayer: (PrayerTime & { date: Date }) | null;
+  qibla: number;
+  completedCount: number;
+  reminders: Reminder[];
+  tasbih: TasbihState;
+  notes: DailyNote[];
+  notificationStatus: string;
+  voiceEnabled: boolean;
+  timeFormat: TimeFormat;
+}) {
+  const values: Record<WidgetKey, string> = {
+    time: formatClock(props.clock, props.timeFormat),
+    nextPrayer: props.nextPrayer?.name ?? "-",
+    countdown: props.nextPrayer ? durationText(props.nextPrayer.date.getTime() - props.clock.getTime()) : "-",
+    qibla: `${Math.round(props.qibla)}°`,
+    progress: `${props.completedCount}/5`,
+    reminders: `${props.reminders.filter((item) => item.status === "scheduled").length}`,
+    tasbih: `${props.tasbih.count}/${props.tasbih.target}`,
+    note: props.notes.find((item) => !item.done)?.text ?? "Belum ada",
+    notification: props.notificationStatus,
+    voice: props.voiceEnabled ? "aktif" : "nonaktif",
+  };
+  return (
+    <section className="card">
+      <SectionTitle title="Dashboard Widgets" subtitle="Ringkas, bisa diatur dari Pengaturan." />
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {props.enabled.map((key) => <StatusItem key={key} label={widgetLabels[key]} value={values[key]} />)}
+      </div>
+    </section>
+  );
+}
+
+function DailyChecklistCard(props: {
+  dateKey: string;
+  itemsByDate: Record<string, DailyChecklistItem[]>;
+  setItemsByDate: React.Dispatch<React.SetStateAction<Record<string, DailyChecklistItem[]>>>;
+}) {
+  const [customText, setCustomText] = useState("");
+  const items = props.itemsByDate[props.dateKey] ?? defaultChecklistTexts.map((text, index) => ({ id: `default-${index}`, text, custom: false, done: false }));
+  const done = items.filter((item) => item.done).length;
+  const save = (nextItems: DailyChecklistItem[]) => props.setItemsByDate((current) => ({ ...current, [props.dateKey]: nextItems }));
+  const addCustom = () => {
+    const text = customText.trim();
+    if (!text) return;
+    save([...items, { id: `${Date.now()}`, text, custom: true, done: false }]);
+    setCustomText("");
+  };
+  return (
+    <section className="card">
+      <SectionTitle title="Checklist Harian" subtitle={`${Math.round((done / items.length) * 100)}% selesai. Pelan-pelan, cukup tandai yang sudah dilakukan.`} />
+      <div className="h-3 overflow-hidden rounded-full bg-line"><div className="h-full bg-brand" style={{ width: `${(done / items.length) * 100}%` }} /></div>
+      <div className="mt-3 grid gap-2">
+        {items.map((item) => (
+          <label key={item.id} className="flex min-h-11 items-center justify-between gap-2 rounded-xl border border-line bg-page px-3">
+            <span className="flex items-center gap-2">
+              <input type="checkbox" checked={item.done} onChange={(event) => save(items.map((entry) => entry.id === item.id ? { ...entry, done: event.target.checked } : entry))} />
+              <span className={item.done ? "line-through text-muted" : ""}>{item.text}</span>
+            </span>
+            {item.custom ? <button className="text-sm font-semibold text-rose-600" onClick={() => save(items.filter((entry) => entry.id !== item.id))}>Hapus</button> : null}
+          </label>
+        ))}
+      </div>
+      <form className="mt-3 flex gap-2" onSubmit={(event) => { event.preventDefault(); addCustom(); }}>
+        <input className="input" value={customText} onChange={(event) => setCustomText(event.target.value)} placeholder="Tambah checklist pribadi" aria-label="Tambah checklist pribadi" />
+        <Button variant="primary" type="submit">Tambah</Button>
+      </form>
+    </section>
+  );
+}
+
+function CommandHistory(props: {
+  history: CommandHistoryItem[];
+  runCommand: (command: string) => void;
+  clearHistory: () => void;
+  timeFormat: TimeFormat;
+}) {
+  if (!props.history.length) return null;
+  return (
+    <div className="mt-4">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <p className="font-bold">Riwayat Command</p>
+        <Button onClick={props.clearHistory}>Bersihkan</Button>
+      </div>
+      <div className="grid gap-2">
+        {props.history.slice(0, 5).map((item) => (
+          <button key={item.id} className="rounded-xl border border-line bg-page p-3 text-left" onClick={() => props.runCommand(item.command)}>
+            <p className="font-semibold">{item.command}</p>
+            <p className="text-xs text-muted">{item.intent} - {item.status} - {formatClock(new Date(item.time), props.timeFormat)}</p>
+            <p className="mt-1 text-sm text-muted">{item.response}</p>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PrayerTab(props: {
   schedule: PrayerSchedule | null;
   scheduleStatus: string;
@@ -1237,9 +1678,12 @@ function PrayerTab(props: {
   tasbih: TasbihState;
   setTasbih: React.Dispatch<React.SetStateAction<TasbihState>>;
   timeFormat: TimeFormat;
+  clock: Date;
 }) {
   return (
     <>
+      <AdzanTimeline schedule={props.schedule} clock={props.clock} timeFormat={props.timeFormat} />
+
       <section className="card">
         <SectionTitle title="Jadwal Sholat" subtitle={`Status: ${props.scheduleStatus}`} />
         {props.schedule ? (
@@ -1318,6 +1762,47 @@ function PrayerTab(props: {
       <TasbihCard tasbih={props.tasbih} setTasbih={props.setTasbih} />
       <HijriMini schedule={props.schedule} />
     </>
+  );
+}
+
+function AdzanTimeline({ schedule, clock, timeFormat }: { schedule: PrayerSchedule | null; clock: Date; timeFormat: TimeFormat }) {
+  if (!schedule) {
+    return (
+      <section className="card">
+        <SectionTitle title="Timeline Adzan" />
+        <p className="rounded-xl bg-page p-3 text-sm text-muted">Jadwal belum dimuat. Pilih kota atau gunakan lokasi untuk melihat timeline.</p>
+      </section>
+    );
+  }
+  const points = prayerNames.map((name) => {
+    const parsed = parseClockTime(schedule.timings[name]);
+    return { name, minutes: parsed ? parsed.hour * 60 + parsed.minute : 0, time: schedule.timings[name] };
+  });
+  const nowMinutes = clock.getHours() * 60 + clock.getMinutes();
+  const first = Math.min(...points.map((item) => item.minutes));
+  const last = Math.max(...points.map((item) => item.minutes));
+  const range = Math.max(1, last - first);
+  const nowPercent = clampNumber(((nowMinutes - first) / range) * 100, 0, 100);
+  const next = points.find((item) => item.minutes > nowMinutes)?.name ?? "Subuh";
+  return (
+    <section className="card">
+      <SectionTitle title="Timeline Adzan" subtitle="Marker menunjukkan posisi waktu sekarang terhadap jadwal hari ini." />
+      <div className="relative mt-6 h-4 rounded-full bg-line">
+        <div className="absolute top-[-6px] h-7 w-1 rounded-full bg-rose-500" style={{ left: `${nowPercent}%` }} />
+        {points.map((point) => {
+          const left = ((point.minutes - first) / range) * 100;
+          const passed = point.minutes <= nowMinutes;
+          return (
+            <div key={point.name} className="absolute top-1/2 -translate-y-1/2" style={{ left: `${left}%` }}>
+              <div className={`h-4 w-4 -translate-x-1/2 rounded-full border-2 ${point.name === next ? "border-brand bg-brand" : passed ? "border-brand bg-brandSoft" : "border-muted bg-panel"}`} />
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-6 grid grid-cols-5 gap-1 text-center text-xs">
+        {points.map((point) => <div key={point.name}><p className="font-bold">{point.name}</p><p className="text-muted">{formatClock(point.time, timeFormat)}</p></div>)}
+      </div>
+    </section>
   );
 }
 
@@ -1413,6 +1898,8 @@ function ReminderTab(props: {
   addDailyNote: () => void;
   setNotes: React.Dispatch<React.SetStateAction<Record<string, DailyNote[]>>>;
   todayKey: string;
+  quranReminder: { enabled: boolean; time: string };
+  setQuranReminder: React.Dispatch<React.SetStateAction<{ enabled: boolean; time: string }>>;
 }) {
   const active = props.reminders.filter((item) => item.status === "scheduled");
   const missed = props.reminders.filter((item) => item.status === "missed" || item.status === "fired");
@@ -1433,6 +1920,24 @@ function ReminderTab(props: {
         <div className="mt-3 grid grid-cols-2 gap-2">
           {["10 menit lagi", "30 menit lagi", "1 jam lagi", "17:46"].map((item) => <Button key={item} onClick={() => props.addReminderFromText(item)}>{item}</Button>)}
         </div>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Reminder Baca Qur'an" subtitle="Berjalan dengan scheduler web saat WaktuAI terbuka atau PWA aktif." />
+        <label className="flex min-h-11 items-center justify-between gap-3">
+          <span className="font-semibold">Aktifkan reminder harian</span>
+          <input type="checkbox" checked={props.quranReminder.enabled} onChange={(event) => props.setQuranReminder((current) => ({ ...current, enabled: event.target.checked }))} />
+        </label>
+        <div className="mt-3 flex gap-2">
+          <input className="input" type="time" value={props.quranReminder.time} onChange={(event) => props.setQuranReminder((current) => ({ ...current, time: event.target.value }))} aria-label="Jam reminder Qur'an" />
+          <Button
+            variant="primary"
+            onClick={() => props.addReminderFromText(`ingatkan baca quran jam ${props.quranReminder.time} setiap hari`)}
+          >
+            Simpan
+          </Button>
+        </div>
+        <Button className="mt-3 w-full" onClick={() => props.addReminderFromText("ingatkan baca quran 1 menit lagi")}>Test reminder Qur'an</Button>
       </section>
 
       <section className="card">
@@ -1586,6 +2091,10 @@ function SettingsTab(props: {
   setNotifications: React.Dispatch<React.SetStateAction<WebNotificationSettings>>;
   voice: VoiceSettings;
   setVoice: React.Dispatch<React.SetStateAction<VoiceSettings>>;
+  adzanAudio: AdzanAudioSettings;
+  setAdzanAudio: React.Dispatch<React.SetStateAction<AdzanAudioSettings>>;
+  audioUnlocked: boolean;
+  setAudioUnlocked: React.Dispatch<React.SetStateAction<boolean>>;
   playBeep: () => void;
   coords: Coordinates;
   requestGps: () => void;
@@ -1616,6 +2125,14 @@ function SettingsTab(props: {
   setReminders: React.Dispatch<React.SetStateAction<Reminder[]>>;
   setTracker: React.Dispatch<React.SetStateAction<PrayerTracker>>;
   setCoords: React.Dispatch<React.SetStateAction<Coordinates>>;
+  dashboardWidgets: WidgetKey[];
+  setDashboardWidgets: React.Dispatch<React.SetStateAction<WidgetKey[]>>;
+  prayerAdjustments: PrayerAdjustments;
+  setPrayerAdjustments: React.Dispatch<React.SetStateAction<PrayerAdjustments>>;
+  commandHistory: CommandHistoryItem[];
+  setCommandHistory: React.Dispatch<React.SetStateAction<CommandHistoryItem[]>>;
+  reminderTone: ReminderTone;
+  setReminderTone: React.Dispatch<React.SetStateAction<ReminderTone>>;
 }) {
   const setDndFor = (minutes: number) => props.setDnd({ enabled: true, until: new Date(Date.now() + minutes * 60_000).toISOString() });
   return (
@@ -1639,6 +2156,54 @@ function SettingsTab(props: {
           <Button onClick={() => props.setNotifications((current) => ({ ...current, enabled: false }))}>Matikan Semua Notifikasi</Button>
         </div>
         <p className="mt-3 text-sm text-muted">Notifikasi web bekerja paling baik saat aplikasi dibuka atau dipasang sebagai PWA. Untuk push saat browser benar-benar tertutup, dibutuhkan backend Web Push khusus.</p>
+      </section>
+
+      <AdzanSoundSettings
+        settings={props.adzanAudio}
+        audioUnlocked={props.audioUnlocked}
+        onSettingsChange={props.setAdzanAudio}
+        onAudioUnlocked={props.setAudioUnlocked}
+        onToast={props.addToast}
+      />
+
+      <section className="card">
+        <SectionTitle title="Preset Rutinitas Sholat" subtitle="Preset langsung mengubah notifikasi, pre-reminder, repeat, dan suara AI." />
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            ["Minimal", "Notifikasi waktu sholat saja, tanpa voice dan repeat."],
+            ["Balanced", "Pre-reminder 10 menit, notifikasi, dan Voice AI."],
+            ["Strong", "Pre-reminder 15 menit, repeat terbatas, dan Voice AI."],
+            ["Silent", "Banner/notifikasi tanpa suara otomatis."],
+          ].map(([name, description]) => (
+            <button
+              key={name}
+              className="rounded-xl border border-line bg-page p-3 text-left"
+              onClick={() => {
+                if (name === "Minimal") {
+                  props.setNotifications((current) => ({ ...current, enabled: true, preReminder: 0, repeatMode: "off" }));
+                  props.setVoice((current) => ({ ...current, enabled: false }));
+                  props.setAdzanAudio((current) => ({ ...current, source: "off", enabled: false }));
+                } else if (name === "Balanced") {
+                  props.setNotifications((current) => ({ ...current, enabled: true, preReminder: 10, repeatMode: "gentle" }));
+                  props.setVoice((current) => ({ ...current, enabled: true }));
+                  props.setAdzanAudio((current) => ({ ...current, source: "voice", enabled: true }));
+                } else if (name === "Strong") {
+                  props.setNotifications((current) => ({ ...current, enabled: true, preReminder: 15, repeatMode: "strong" }));
+                  props.setVoice((current) => ({ ...current, enabled: true }));
+                  props.setAdzanAudio((current) => ({ ...current, source: "voice", enabled: true }));
+                } else {
+                  props.setNotifications((current) => ({ ...current, enabled: true, repeatMode: "off" }));
+                  props.setVoice((current) => ({ ...current, enabled: false }));
+                  props.setAdzanAudio((current) => ({ ...current, source: "off", enabled: false }));
+                }
+                props.addToast(`Preset ${name} diterapkan.`, "success");
+              }}
+            >
+              <p className="font-bold">{name}</p>
+              <p className="text-sm text-muted">{description}</p>
+            </button>
+          ))}
+        </div>
       </section>
 
       <section className="card">
@@ -1708,6 +2273,55 @@ function SettingsTab(props: {
           </div>
         </div>
         <p className="mt-3 text-sm text-muted">Jika jadwal terasa berbeda, pilih metode perhitungan yang sesuai daerah kamu.</p>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Widget Beranda" subtitle="Pilih widget ringkas yang tampil di Beranda." />
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {(Object.keys(widgetLabels) as WidgetKey[]).map((key) => (
+            <label key={key} className="flex min-h-11 items-center gap-2 rounded-xl border border-line px-3">
+              <input
+                type="checkbox"
+                checked={props.dashboardWidgets.includes(key)}
+                onChange={(event) => props.setDashboardWidgets((items) => event.target.checked ? [...items, key] : items.filter((item) => item !== key))}
+              />
+              {widgetLabels[key]}
+            </label>
+          ))}
+        </div>
+        <Button className="mt-3" onClick={() => props.setDashboardWidgets(defaultWidgets)}>Reset Widget</Button>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Penyesuaian Jadwal" subtitle="Gunakan jika jadwal daerah kamu berbeda beberapa menit." />
+        <div className="grid gap-2 sm:grid-cols-2">
+          {prayerNames.map((name) => (
+            <label key={name}>
+              <span className="mb-1 block text-sm font-semibold">Adjust {name}: {props.prayerAdjustments[name]} menit</span>
+              <input
+                className="w-full"
+                type="range"
+                min={-5}
+                max={5}
+                value={props.prayerAdjustments[name]}
+                onChange={(event) => props.setPrayerAdjustments((current) => ({ ...current, [name]: Number(event.target.value) }))}
+              />
+            </label>
+          ))}
+        </div>
+        <Button className="mt-3" onClick={() => props.setPrayerAdjustments(defaultPrayerAdjustments)}>Reset Adjustment</Button>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Gaya Pengingat" subtitle="Semua pilihan tetap sopan dan tidak menyalahkan." />
+        <select className="input" value={props.reminderTone} onChange={(event) => props.setReminderTone(event.target.value as ReminderTone)}>
+          <option value="soft">Lembut</option>
+          <option value="neutral">Netral</option>
+          <option value="firm">Tegas</option>
+        </select>
+        <div className="mt-3 rounded-xl bg-page p-3 text-sm text-muted">
+          {props.reminderTone === "soft" ? "Sudah masuk waktu Isya. Pelan-pelan yuk bersiap." : props.reminderTone === "firm" ? "Sudah masuk waktu Isya. Jangan lupa sholat." : "Sudah masuk waktu Isya."}
+        </div>
       </section>
 
       <section className="card">
