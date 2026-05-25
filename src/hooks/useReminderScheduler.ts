@@ -35,10 +35,11 @@ export function useReminderScheduler(options: UseReminderSchedulerOptions): void
     let changed = false;
 
     for (const reminder of reminders) {
-      if (reminder.done) continue;
+      if (reminder.done || reminder.status === "done" || reminder.status === "cancelled") continue;
       const due = new Date(reminder.dateTime).getTime();
       if (Number.isNaN(due) || now < due) continue;
-      const sentKey = `${reminder.id}:${reminder.repeatCount}`;
+      const repeatCount = reminder.repeatCount ?? reminder.snoozeCount ?? 0;
+      const sentKey = `${reminder.id}:${repeatCount}`;
       if (sentReminderIds.includes(sentKey)) continue;
 
       const body = `${reminder.title} sekarang.`;
@@ -48,7 +49,7 @@ export function useReminderScheduler(options: UseReminderSchedulerOptions): void
       onReminderBanner({ reminder, message: body });
       nextSent = [...nextSent, sentKey];
       changed = true;
-      if (reminder.alarmMode && reminder.repeatCount < 3) onReminderRepeat(reminder.id);
+      if (reminder.alarmMode && repeatCount < 3) onReminderRepeat(reminder.id);
     }
 
     if (changed) onSentReminderIdsChange(nextSent);

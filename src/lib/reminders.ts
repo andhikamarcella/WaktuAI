@@ -13,12 +13,24 @@ export interface Reminder {
   firedKeys: string[];
   snoozeCount: number;
   history: string[];
+  done?: boolean;
+  repeatCount?: number;
+  alarmMode?: boolean;
 }
 
 export interface ParsedReminder {
+  ok: true;
   reminder: Reminder;
   response: string;
 }
+
+export type ParseReminderOptions = {
+  now?: Date;
+  prayerTimes?: Partial<Record<string, string>>;
+  format?: TimeFormat;
+};
+
+export type ParseReminderResult = ParsedReminder | { ok: false; response: string };
 
 const prayerAliases: Record<string, string> = {
   subuh: "Subuh",
@@ -41,7 +53,7 @@ function normalizeRepeat(input: string): RepeatRule {
   return "once";
 }
 
-function createReminder(title: string, date: Date, repeat: RepeatRule): Reminder {
+function createReminder(title: string, date: Date, repeat: RepeatRule, alarmMode = false): Reminder {
   const now = new Date();
   return {
     id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -52,6 +64,9 @@ function createReminder(title: string, date: Date, repeat: RepeatRule): Reminder
     repeat,
     firedKeys: [],
     snoozeCount: 0,
+    done: false,
+    repeatCount: 0,
+    alarmMode,
     history: [`Dijadwalkan ${now.toISOString()}`],
   };
 }
@@ -73,15 +88,16 @@ export function nextRepeatDate(from: Date, repeat: RepeatRule): Date | null {
   return next;
 }
 
-export function parseReminderInput(
+function parseReminderCore(
   rawInput: string,
-  now = new Date(),
-  prayerTimes: Partial<Record<string, string>> = {},
-  format: TimeFormat = "24h",
+  now: Date,
+  prayerTimes: Partial<Record<string, string>>,
+  format: TimeFormat,
 ): ParsedReminder | null {
   const input = rawInput.trim().toLowerCase();
   if (!input) return null;
   const repeat = normalizeRepeat(input);
+  const alarmMode = /\b(alarm|bangunin|bangunkan)\b/.test(input);
 
   const duration = input.match(/\b(\d+)\s*(menit|mnt|minute|jam|hour)\s*(lagi)?\b/);
   if (duration) {
@@ -90,7 +106,8 @@ export function parseReminderInput(
     const minutes = unit.startsWith("jam") || unit === "hour" ? amount * 60 : amount;
     const date = new Date(now.getTime() + minutes * 60_000);
     return {
-      reminder: createReminder(`Pengingat ${amount} ${unit}`, date, repeat),
+      ok: true,
+      reminder: createReminder(`Pengingat ${amount} ${unit}`, date, repeat, alarmMode),
       response: `Siap, aku akan ingatkan ${amount} ${unit} lagi.`,
     };
   }
@@ -102,12 +119,14 @@ export function parseReminderInput(
     if (date.getTime() <= now.getTime()) {
       date.setDate(date.getDate() + 1);
       return {
-        reminder: createReminder(`Pengingat jam ${clock}`, date, repeat),
+        ok: true,
+        reminder: createReminder(`Pengingat jam ${clock}`, date, repeat, alarmMode),
         response: `Jam ${clock} hari ini sudah lewat, jadi aku ingatkan besok jam ${clock}.`,
       };
     }
     return {
-      reminder: createReminder(`Pengingat jam ${clock}`, date, repeat),
+      ok: true,
+      reminder: createReminder(`Pengingat jam ${clock}`, date, repeat, alarmMode),
       response: `Siap, aku akan ingatkan jam ${clock}.`,
     };
   }
@@ -122,7 +141,8 @@ export function parseReminderInput(
       let date = dateAtLocalTime(now, hour, 0);
       if (date.getTime() <= now.getTime()) date.setDate(date.getDate() + 1);
       return {
-        reminder: createReminder(`Pengingat jam ${formatClock(date, format)}`, date, repeat),
+        ok: true,
+        reminder: createReminder(`Pengingat jam ${formatClock(date, format)}`, date, repeat, alarmMode),
         response: `Siap, aku akan ingatkan jam ${formatClock(date, format)}.`,
       };
     }
@@ -137,10 +157,36 @@ export function parseReminderInput(
     let date = dateAtLocalTime(now, parsed.hour, parsed.minute);
     if (date.getTime() <= now.getTime()) date.setDate(date.getDate() + 1);
     return {
-      reminder: createReminder(`Pengingat sholat ${prayerName}`, date, repeat),
+      ok: true,
+      reminder: createReminder(`Pengingat sholat ${prayerName}`, date, repeat, alarmMode),
       response: `Siap, aku akan ingatkan waktu ${prayerName}.`,
     };
   }
 
   return null;
+}
+
+export function parseReminderInput(rawInput: string, options: ParseReminderOptions): ParseReminderResult;
+export function parseReminderInput(
+  rawInput: string,
+  now?: Date,
+  prayerTimes?: Partial<Record<string, string>>,
+  format?: TimeFormat,
+): ParsedReminder | null;
+export function parseReminderInput(
+  rawInput: string,
+  nowOrOptions: Date | ParseReminderOptions = new Date(),
+  prayerTimes: Partial<Record<string, string>> = {},
+  format: TimeFormat = "24h",
+): ParsedReminder | ParseReminderResult | null {
+  const options = nowOrOptions instanceof Date ? { now: nowOrOptions, prayerTimes, format } : nowOrOptions;
+  const result = parseReminderCore(
+    rawInput,
+    options.now ?? new Date(),
+    options.prayerTimes ?? {},
+    options.format ?? "24h",
+  );
+
+  if (nowOrOptions instanceof Date) return result;
+  return result ?? { ok: false, response: "Aku belum paham waktu reminder itu." };
 }
