@@ -12,6 +12,9 @@ export type CommandIntent =
   | "FALLBACK_MANUAL_RAKAAT"
   | "QIBLA"
   | "PRAYER_TIME"
+  | "ALL_PRAYER_TIMES"
+  | "CURRENT_TIME"
+  | "CURRENT_DATE"
   | "NEXT_PRAYER"
   | "MARK_PRAYER_DONE"
   | "TASBIH"
@@ -53,6 +56,9 @@ export function parseCommand(raw: string): ParsedCommand {
   if (includesAny(text, ["mulai deteksi rakaat"])) return { intent: "START_RAKAAT_DETECTION", text };
   if (includesAny(text, ["pakai hitung manual", "kamera tidak bisa"])) return { intent: "FALLBACK_MANUAL_RAKAAT", text };
   if (includesAny(text, ["arah kiblat", "kiblat"])) return { intent: "QIBLA", text };
+  if (/(jadwal|waktu).*(sholat|shalat|solat|adzan)|jadwal hari ini|jadwal sholat hari ini|jadwal solat hari ini/.test(text)) return { intent: "ALL_PRAYER_TIMES", text };
+  if (/(jam berapa|sekarang jam|waktu sekarang|udah jam)/.test(text)) return { intent: "CURRENT_TIME", text };
+  if (/(tanggal berapa|hari apa|tanggal hari ini)/.test(text)) return { intent: "CURRENT_DATE", text };
   if (includesAny(text, ["adzan selanjutnya", "sholat selanjutnya"])) return { intent: "NEXT_PRAYER", text };
   if (includesAny(text, ["udah sholat", "sudah sholat", "catat sholat"])) return { intent: "MARK_PRAYER_DONE", text };
   if (includesAny(text, ["hitung tasbih", "tasbih"])) return { intent: "TASBIH", text };

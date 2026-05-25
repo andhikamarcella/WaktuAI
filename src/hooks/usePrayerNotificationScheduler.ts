@@ -32,6 +32,8 @@ export interface DndSettings {
   until: string | null;
 }
 
+export type PrayerSoundMode = "full" | "voice" | "silent" | "off";
+
 export interface HistoryLog {
   id: string;
   type: string;
@@ -60,6 +62,7 @@ interface SchedulerArgs {
   voice: VoiceSettings;
   dnd: DndSettings;
   adzanAudio: AdzanAudioSettings;
+  prayerSoundModes: Record<PrayerName, PrayerSoundMode>;
   audioUnlocked: boolean;
   completedPrayers: Record<string, PrayerName[]>;
   reminders: Reminder[];
@@ -215,16 +218,18 @@ export function usePrayerNotificationScheduler(args: SchedulerArgs) {
         const soundKey = `${dateKey}-${prayer.name}-adzan-sound`;
         const shouldTryAdzanSound = offset <= 0 && !sentSet.has(soundKey);
         const shouldTryPreparationSound = offset < 0;
-        if (shouldTryAdzanSound || shouldTryPreparationSound) {
+        const soundMode = current.prayerSoundModes[prayer.name] ?? "full";
+        if ((shouldTryAdzanSound || shouldTryPreparationSound) && soundMode !== "off" && soundMode !== "silent") {
+          const soundSettings = soundMode === "voice" ? { ...current.adzanAudio, enabled: true, source: "voice" as const } : current.adzanAudio;
           void playSelectedAdzanSound({
             prayerName: prayer.name,
             mode: isPre ? "preReminder" : "time",
-            settings: current.adzanAudio,
+            settings: soundSettings,
           }).then((result) => {
             current.onAdzanAudioResult({
-              ...current.adzanAudio,
+              ...soundSettings,
               lastTestResult: result.ok ? `Suara adzan: ${result.source ?? "audio"} berhasil.` : result.reason ?? "Suara adzan gagal.",
-              lastPlayedAt: result.ok ? new Date().toISOString() : current.adzanAudio.lastPlayedAt,
+              lastPlayedAt: result.ok ? new Date().toISOString() : soundSettings.lastPlayedAt,
               lastFailedReason: result.ok ? undefined : result.reason,
             });
             current.onLog({
