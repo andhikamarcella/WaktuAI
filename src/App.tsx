@@ -1,513 +1,1991 @@
-import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import { CommandCenter } from "./components/CommandCenter";
-import { HelpCards } from "./components/HelpCards";
-import { RakaatCard } from "./components/RakaatCard";
-import { useLocalStorage } from "./hooks/useLocalStorage";
-import { PrayerBanner, PrayerNotificationPreferences, usePrayerNotificationScheduler } from "./hooks/usePrayerNotificationScheduler";
-import { ReminderBanner, useReminderScheduler } from "./hooks/useReminderScheduler";
-import { useSpeechRecognition } from "./hooks/useSpeechRecognition";
-import { getNotificationPermissionState, NotificationPermissionState, requestNotificationPermission, sendBrowserNotification } from "./lib/notifications";
-import { parseReminderInput, Reminder } from "./lib/reminders";
-import { speakIndonesian } from "./lib/speech";
-import { buildTodayPrayerSchedule, formatHHMM, formatLocalDate, PrayerName, PrayerTime, toLocalDateTimeText } from "./lib/time";
-import { parseVoiceCommand } from "./lib/voiceCommands";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  DndSettings,
+  HistoryLog,
+  PrayerBanner,
+  PrayerName,
+  PrayerTime,
+  ReminderMode,
+  VoiceSettings,
+  WebNotificationSettings,
+  usePrayerNotificationScheduler,
+} from "./hooks/usePrayerNotificationScheduler";
+import { Reminder, RepeatRule, parseReminderInput } from "./lib/reminders";
+import { TimeFormat, clampNumber, displayDate, durationText, formatClock, formatDateTime, localDateKey, parseClockTime } from "./lib/time";
+import { parseCommand, suggestedCommands } from "./lib/voiceCommands";
 
-type BeforeInstallPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-};
+type Tab = "home" | "prayer" | "reminder" | "rakaat" | "settings";
+type ThemeMode = "system" | "light" | "dark";
+type ToastTone = "success" | "error" | "info";
+type LocationSource = "GPS" | "Manual city" | "Default Jakarta";
+type CameraStatus = "idle" | "requesting" | "active" | "denied" | "unavailable" | "model-unavailable" | "insecure";
+type NotificationPermissionState = "unsupported" | NotificationPermission;
 
-const DEFAULT_PRAYER_PREFS: PrayerNotificationPreferences = {
-  enabled: false,
-  prayers: {
-    Subuh: true,
-    Dzuhur: true,
-    Ashar: true,
-    Maghrib: true,
-    Isya: true
-  },
-  preReminderMinutes: 10,
-  reminderMode: "gentle",
-  doNotDisturb: false,
-  voiceEnabled: true
-};
-
-function makeToastId(): string {
-  return `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+interface Toast {
+  id: string;
+  message: string;
+  tone: ToastTone;
 }
 
-function App() {
-  const [prayerTimes, setPrayerTimes] = useLocalStorage<PrayerTime[]>("waktuai.prayerTimes", buildTodayPrayerSchedule());
-  const [preferences, setPreferences] = useLocalStorage<PrayerNotificationPreferences>("waktuai.prayerPrefs", DEFAULT_PRAYER_PREFS);
-  const [sentPrayerKeys, setSentPrayerKeys] = useLocalStorage<string[]>("waktuai.sentPrayerKeys", []);
-  const [completedPrayerKeys, setCompletedPrayerKeys] = useLocalStorage<string[]>("waktuai.completedPrayerKeys", []);
-  const [disabledTodayKeys, setDisabledTodayKeys] = useLocalStorage<string[]>("waktuai.disabledTodayKeys", []);
-  const [reminders, setReminders] = useLocalStorage<Reminder[]>("waktuai.reminders", []);
-  const [sentReminderIds, setSentReminderIds] = useLocalStorage<string[]>("waktuai.sentReminderIds", []);
-  const [command, setCommand] = useState("");
-  const [assistantText, setAssistantText] = useState("Assalamu'alaikum. Tulis perintah, buat reminder, atau buka bantuan kalau bingung.");
-  const [showHelp, setShowHelp] = useState(false);
-  const [toasts, setToasts] = useState<Array<{ id: string; message: string }>>([]);
-  const [prayerBanner, setPrayerBanner] = useState<PrayerBanner | null>(null);
-  const [reminderBanner, setReminderBanner] = useState<ReminderBanner | null>(null);
-  const [notificationState, setNotificationState] = useState<NotificationPermissionState>(getNotificationPermissionState());
-  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+interface Coordinates {
+  lat: number;
+  lon: number;
+  city: string;
+  source: LocationSource;
+  accuracy?: number;
+  updatedAt?: string;
+}
 
-  const today = formatLocalDate(new Date());
-  const prayerTimeMap = useMemo(
-    () => Object.fromEntries(prayerTimes.map((item) => [item.name, item.time])) as Partial<Record<PrayerName, string>>,
-    [prayerTimes]
+interface PrayerSchedule {
+  dateKey: string;
+  city: string;
+  source: LocationSource;
+  timings: Record<PrayerName, string>;
+  hijri?: {
+    day: string;
+    month: string;
+    year: string;
+  };
+  fetchedAt: string;
+}
+
+interface PrayerTracker {
+  [dateKey: string]: PrayerName[];
+}
+
+interface TasbihState {
+  count: number;
+  target: number;
+  preset: string;
+}
+
+interface DailyNote {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
+const prayerNames: PrayerName[] = ["Subuh", "Dzuhur", "Ashar", "Maghrib", "Isya"];
+const defaultPerPrayer = Object.fromEntries(prayerNames.map((name) => [name, true])) as Record<PrayerName, boolean>;
+const dailyReminders = [
+  "Jaga sholat tepat waktu hari ini.",
+  "Sedikit demi sedikit, yang penting istiqamah.",
+  "Gunakan waktu sebelum adzan untuk bersiap.",
+  "Siapkan wudhu lebih awal saat memungkinkan.",
+];
+
+const cityOptions: Record<string, { lat: number; lon: number }> = {
+  Jakarta: { lat: -6.2088, lon: 106.8456 },
+  Bekasi: { lat: -6.2383, lon: 106.9756 },
+  Bandung: { lat: -6.9175, lon: 107.6191 },
+  Surabaya: { lat: -7.2575, lon: 112.7521 },
+  Yogyakarta: { lat: -7.7956, lon: 110.3695 },
+  Medan: { lat: 3.5952, lon: 98.6722 },
+  Makassar: { lat: -5.1477, lon: 119.4327 },
+};
+
+const methodOptions = [
+  { label: "Kemenag Indonesia", value: 20 },
+  { label: "Muslim World League", value: 3 },
+  { label: "Umm Al-Qura", value: 4 },
+  { label: "Egyptian", value: 5 },
+];
+
+const defaultQuickActions = ["Jadwal Sholat", "Adzan Berikutnya", "Tambah Reminder", "Arah Kiblat", "Tes Notifikasi", "Hitung Rakaat", "Tasbih"];
+
+function safeRead<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeWrite<T>(key: string, value: T) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function useStoredState<T>(key: string, fallback: T) {
+  const [value, setValue] = useState<T>(() => safeRead(key, fallback));
+  useEffect(() => safeWrite(key, value), [key, value]);
+  return [value, setValue] as const;
+}
+
+function makeLog(item: Omit<HistoryLog, "id" | "time">): HistoryLog {
+  return {
+    ...item,
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    time: new Date().toISOString(),
+  };
+}
+
+function Button(props: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "soft" }) {
+  const { variant = "secondary", className = "", ...rest } = props;
+  const cls = variant === "primary" ? "btn-primary" : variant === "soft" ? "btn-soft" : "btn-secondary";
+  return <button className={`${cls} ${className}`} {...rest} />;
+}
+
+function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="mb-3">
+      <h2 className="text-lg font-bold text-ink">{title}</h2>
+      {subtitle ? <p className="mt-1 text-sm leading-5 text-muted">{subtitle}</p> : null}
+    </div>
+  );
+}
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return <label className="mb-1 block text-sm font-semibold text-ink">{children}</label>;
+}
+
+function qiblaDirection(lat: number, lon: number): number {
+  const kaabaLat = (21.422487 * Math.PI) / 180;
+  const kaabaLon = (39.826206 * Math.PI) / 180;
+  const lat1 = (lat * Math.PI) / 180;
+  const lon1 = (lon * Math.PI) / 180;
+  const deltaLon = kaabaLon - lon1;
+  const y = Math.sin(deltaLon);
+  const x = Math.cos(lat1) * Math.tan(kaabaLat) - Math.sin(lat1) * Math.cos(deltaLon);
+  const bearing = (Math.atan2(y, x) * 180) / Math.PI;
+  return (bearing + 360) % 360;
+}
+
+function cleanTiming(value: string | undefined): string | null {
+  if (!value) return null;
+  const parsed = parseClockTime(value);
+  return parsed ? `${String(parsed.hour).padStart(2, "0")}:${String(parsed.minute).padStart(2, "0")}` : null;
+}
+
+function getNotificationPermission(): NotificationPermissionState {
+  if (!("Notification" in window)) return "unsupported";
+  return Notification.permission;
+}
+
+function createNotification(title: string, body: string): boolean {
+  if (!("Notification" in window) || Notification.permission !== "granted") return false;
+  try {
+    new Notification(title, { body, icon: "/icon.svg", badge: "/icon.svg" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function dndLabel(dnd: DndSettings, format: TimeFormat) {
+  if (!dnd.enabled || !dnd.until) return "Tidak aktif";
+  const date = new Date(dnd.until);
+  if (Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) return "Tidak aktif";
+  return `Aktif sampai ${formatClock(date, format)}`;
+}
+
+function repeatLabel(repeat: RepeatRule) {
+  return {
+    once: "Sekali",
+    daily: "Setiap hari",
+    weekdays: "Hari kerja",
+    weekend: "Akhir pekan",
+    weekly: "Mingguan",
+  }[repeat];
+}
+
+function monthlyStats(tracker: PrayerTracker) {
+  const now = new Date();
+  const ym = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const keys = Object.keys(tracker).filter((key) => key.startsWith(ym));
+  const total = keys.reduce((sum, key) => sum + (tracker[key]?.length ?? 0), 0);
+  const completeDays = keys.filter((key) => (tracker[key]?.length ?? 0) === 5).length;
+  let activeStreak = 0;
+  let fullStreak = 0;
+  for (let i = 0; i < 31; i += 1) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    const count = tracker[localDateKey(date)]?.length ?? 0;
+    if (i === activeStreak && count > 0) activeStreak += 1;
+    if (i === fullStreak && count === 5) fullStreak += 1;
+  }
+  return {
+    daysTracked: keys.length,
+    total,
+    percentage: keys.length ? Math.round((total / (keys.length * 5)) * 100) : 0,
+    completeDays,
+    activeStreak,
+    fullStreak,
+  };
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>("home");
+  const [theme, setTheme] = useStoredState<ThemeMode>("waktuai.theme", "system");
+  const [timeFormat, setTimeFormat] = useStoredState<TimeFormat>("waktuai.timeFormat", "24h");
+  const [coords, setCoords] = useStoredState<Coordinates>("waktuai.location", {
+    lat: cityOptions.Jakarta.lat,
+    lon: cityOptions.Jakarta.lon,
+    city: "Jakarta",
+    source: "Default Jakarta",
+  });
+  const [method, setMethod] = useStoredState<number>("waktuai.prayerMethod", 20);
+  const [schedule, setSchedule] = useStoredState<PrayerSchedule | null>("waktuai.prayerSchedule", null);
+  const [scheduleStatus, setScheduleStatus] = useState<"active" | "cached" | "error" | "loading">("cached");
+  const [notifications, setNotifications] = useStoredState<WebNotificationSettings>("waktuai.notifications", {
+    enabled: false,
+    perPrayer: defaultPerPrayer,
+    preReminder: 10,
+    repeatMode: "gentle",
+    keepPrayerDuringDnd: false,
+  });
+  const [voice, setVoice] = useStoredState<VoiceSettings>("waktuai.voice", {
+    enabled: true,
+    prayer: true,
+    reminder: true,
+    rate: "normal",
+  });
+  const [dnd, setDnd] = useStoredState<DndSettings>("waktuai.dnd", { enabled: false, until: null });
+  const [reminders, setReminders] = useStoredState<Reminder[]>("waktuai.reminders", []);
+  const [tracker, setTracker] = useStoredState<PrayerTracker>("waktuai.prayerTracker", {});
+  const [tasbih, setTasbih] = useStoredState<TasbihState>("waktuai.tasbih", { count: 0, target: 33, preset: "Subhanallah" });
+  const [notes, setNotes] = useStoredState<Record<string, DailyNote[]>>("waktuai.dailyNotes", {});
+  const [history, setHistory] = useStoredState<HistoryLog[]>("waktuai.history", []);
+  const [quickActions, setQuickActions] = useStoredState<string[]>("waktuai.quickActions", defaultQuickActions);
+  const [safeMode, setSafeMode] = useStoredState<boolean>("waktuai.safeMode", false);
+  const [onboardingDone, setOnboardingDone] = useStoredState<boolean>("waktuai.onboardingDone", false);
+  const [dismissedTips, setDismissedTips] = useStoredState<string[]>("waktuai.dismissedTips", []);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionState>(() => getNotificationPermission());
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [clock, setClock] = useState(() => new Date());
+  const [command, setCommand] = useState("");
+  const [assistantReply, setAssistantReply] = useState<string | null>(null);
+  const [troubleshootTopic, setTroubleshootTopic] = useState<string | null>(null);
+  const [prayerBanner, setPrayerBanner] = useState<PrayerBanner | null>(null);
+  const [reminderBanner, setReminderBanner] = useState<{ reminderId: string; title: string; message: string } | null>(null);
+  const [lastTestResult, setLastTestResult] = useState("Belum dites");
+  const [lastVoiceResult, setLastVoiceResult] = useState("Belum dites");
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>("idle");
+  const [rakaat, setRakaat] = useStoredState("waktuai.rakaat", { count: 0, target: 4 });
+  const [orientation, setOrientation] = useState(0);
+  const [importText, setImportText] = useState("");
+  const [newNote, setNewNote] = useState("");
+  const [reminderInput, setReminderInput] = useState("");
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+
+  const addToast = useCallback((message: string, tone: ToastTone = "info") => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setToasts((items) => [...items, { id, message, tone }].slice(-4));
+    window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 4500);
+  }, []);
+
+  const addLog = useCallback(
+    (item: Omit<HistoryLog, "id" | "time">) => {
+      setHistory((items) => [makeLog(item), ...items].slice(0, 50));
+    },
+    [setHistory],
   );
 
-  const showToast = (message: string) => {
-    const id = makeToastId();
-    setToasts((items) => [...items, { id, message }].slice(-4));
-    window.setTimeout(() => {
-      setToasts((items) => items.filter((item) => item.id !== id));
-    }, 5500);
-  };
-
-  const answer = (message: string) => {
-    setAssistantText(message);
-    if (preferences.voiceEnabled) speakIndonesian(message);
-  };
-
-  const speech = useSpeechRecognition({
-    onFinalResult: (text) => runCommand(text),
-    onStart: () => showToast("Mikrofon aktif. Silakan bicara."),
-    onSuccess: () => showToast("Perintah suara diterima."),
-    onError: () => showToast("Mikrofon belum bisa dipakai. Kamu tetap bisa ketik perintah.")
-  });
-
   useEffect(() => {
-    const handler = (event: Event) => {
-      event.preventDefault();
-      setInstallPrompt(event as BeforeInstallPromptEvent);
-    };
-    window.addEventListener("beforeinstallprompt", handler);
-    return () => window.removeEventListener("beforeinstallprompt", handler);
+    const interval = window.setInterval(() => setClock(new Date()), 1000);
+    return () => window.clearInterval(interval);
   }, []);
 
   useEffect(() => {
-    setSentPrayerKeys((keys) => keys.filter((key) => key.startsWith(today)));
-  }, [setSentPrayerKeys, today]);
+    const root = document.documentElement;
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    root.classList.toggle("dark", theme === "dark" || (theme === "system" && prefersDark));
+  }, [theme]);
 
-  usePrayerNotificationScheduler({
+  useEffect(() => {
+    const onOnline = () => {
+      setIsOnline(true);
+      addToast("Online kembali. Jadwal bisa diperbarui.", "success");
+    };
+    const onOffline = () => {
+      setIsOnline(false);
+      addToast("Offline - memakai data terakhir.", "info");
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [addToast]);
+
+  useEffect(() => {
+    const onInstall = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    };
+    window.addEventListener("beforeinstallprompt", onInstall);
+    return () => window.removeEventListener("beforeinstallprompt", onInstall);
+  }, []);
+
+  useEffect(() => {
+    if (!dnd.enabled || !dnd.until) return;
+    const until = new Date(dnd.until).getTime();
+    if (Number.isNaN(until) || until <= Date.now()) {
+      setDnd({ enabled: false, until: null });
+    }
+  }, [clock, dnd, setDnd]);
+
+  const prayerTimes = useMemo<PrayerTime[]>(() => {
+    if (!schedule) return [];
+    return prayerNames.map((name) => ({ name, time: schedule.timings[name] })).filter((item) => Boolean(item.time));
+  }, [schedule]);
+
+  const todayKey = localDateKey(clock);
+  const completedToday = tracker[todayKey] ?? [];
+  const stats = monthlyStats(tracker);
+  const qibla = qiblaDirection(coords.lat, coords.lon);
+
+  const nextPrayer = useMemo(() => {
+    if (!prayerTimes.length) return null;
+    const candidates = prayerTimes
+      .map((item) => {
+        const parsed = parseClockTime(item.time);
+        if (!parsed) return null;
+        const date = new Date(clock);
+        date.setHours(parsed.hour, parsed.minute, 0, 0);
+        return { ...item, date };
+      })
+      .filter(Boolean) as Array<PrayerTime & { date: Date }>;
+    const upcoming = candidates.find((item) => item.date.getTime() > clock.getTime());
+    if (upcoming) return upcoming;
+    const subuh = candidates[0];
+    if (!subuh) return null;
+    const tomorrow = new Date(subuh.date);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return { ...subuh, date: tomorrow };
+  }, [clock, prayerTimes]);
+
+  const dailyReminderText = dailyReminders[Number(todayKey.slice(-2)) % dailyReminders.length];
+
+  const fetchPrayerSchedule = useCallback(async () => {
+    setScheduleStatus("loading");
+    if (!navigator.onLine) {
+      setScheduleStatus(schedule ? "cached" : "error");
+      addToast("Offline - memakai jadwal terakhir.", "info");
+      return;
+    }
+    try {
+      const url = `https://api.aladhan.com/v1/timings?latitude=${coords.lat}&longitude=${coords.lon}&method=${method}`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Prayer API failed");
+      const json = (await response.json()) as {
+        data?: {
+          timings?: Record<string, string>;
+          date?: { hijri?: { day?: string; year?: string; month?: { en?: string; number?: number } } };
+        };
+      };
+      const data = json.data;
+      const timings = data?.timings;
+      if (!timings) throw new Error("No timings");
+      const hijri = data?.date?.hijri;
+      const nextSchedule: PrayerSchedule = {
+        dateKey: todayKey,
+        city: coords.city,
+        source: coords.source,
+        timings: {
+          Subuh: cleanTiming(timings.Fajr) ?? "",
+          Dzuhur: cleanTiming(timings.Dhuhr) ?? "",
+          Ashar: cleanTiming(timings.Asr) ?? "",
+          Maghrib: cleanTiming(timings.Maghrib) ?? "",
+          Isya: cleanTiming(timings.Isha) ?? "",
+        },
+        hijri: hijri
+          ? {
+              day: hijri.day ?? "",
+              month: hijri.month?.en ?? "",
+              year: hijri.year ?? "",
+            }
+          : undefined,
+        fetchedAt: new Date().toISOString(),
+      };
+      setSchedule(nextSchedule);
+      setScheduleStatus("active");
+      addLog({ type: "schedule", title: "Prayer schedule loaded", status: "success" });
+    } catch {
+      setScheduleStatus(schedule ? "cached" : "error");
+      addLog({ type: "schedule", title: "Prayer schedule load failed", status: "failed", reason: "API unavailable or offline" });
+      addToast("Jadwal sholat gagal dimuat. Data cache tetap dipakai jika tersedia.", "error");
+    }
+  }, [addLog, addToast, coords, method, schedule, setSchedule, todayKey]);
+
+  useEffect(() => {
+    fetchPrayerSchedule();
+  }, [coords.lat, coords.lon, method]);
+
+  const scheduler = usePrayerNotificationScheduler({
     prayerTimes,
-    preferences,
-    sentKeys: sentPrayerKeys,
-    completedKeys: completedPrayerKeys,
-    disabledTodayKeys,
-    onSentKeysChange: setSentPrayerKeys,
-    onPrayerBanner: setPrayerBanner,
-    onToast: showToast
-  });
-
-  useReminderScheduler({
+    notifications,
+    voice,
+    dnd,
+    completedPrayers: tracker,
     reminders,
-    sentReminderIds,
-    voiceEnabled: preferences.voiceEnabled,
-    onSentReminderIdsChange: setSentReminderIds,
+    onSetReminders: setReminders,
+    onToast: addToast,
+    onPrayerBanner: setPrayerBanner,
     onReminderBanner: setReminderBanner,
-    onToast: showToast,
-    onReminderRepeat: (id) => {
-      setReminders((items) =>
-        items.map((item) => {
-          if (item.id !== id) return item;
-          const nextDate = new Date();
-          nextDate.setMinutes(nextDate.getMinutes() + 1);
-          return { ...item, dateTime: nextDate.toISOString(), repeatCount: item.repeatCount + 1 };
-        })
-      );
-    }
+    onLog: addLog,
   });
 
-  const enableNotifications = async () => {
-    const result = await requestNotificationPermission();
-    setNotificationState(result);
+  useEffect(() => {
+    addLog({ type: "scheduler", title: "Sistem pengingat diperiksa", status: "success" });
+    scheduler.runCheck();
+  }, []);
+
+  const requestNotificationPermission = async () => {
+    if (!("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      addToast("Browser ini belum mendukung notifikasi.", "error");
+      addLog({ type: "permission", title: "Notification API unsupported", status: "failed" });
+      return;
+    }
+    const result = await Notification.requestPermission();
+    setNotificationPermission(result);
     if (result === "granted") {
-      setPreferences((prefs) => ({ ...prefs, enabled: true }));
-      answer("Notifikasi sholat aktif selama WaktuAI terbuka atau PWA aktif.");
-      showToast("Notifikasi sholat aktif selama WaktuAI terbuka atau PWA aktif.");
+      setNotifications((current) => ({ ...current, enabled: true }));
+      addToast("Notifikasi sholat aktif.", "success");
     } else if (result === "denied") {
-      answer("Izin notifikasi ditolak. Aktifkan lagi dari pengaturan browser.");
-      showToast("Izin notifikasi ditolak. Aktifkan lagi dari pengaturan browser.");
-    } else {
-      answer("Browser ini belum mendukung Notification API. Aku tetap tampilkan pengingat di dalam aplikasi.");
-      showToast("Browser ini belum mendukung Notification API.");
+      addToast("Izin notifikasi ditolak. Aktifkan dari pengaturan browser.", "error");
+      addLog({ type: "permission", title: "Notification permission denied", status: "failed" });
     }
   };
 
-  const sendTest = () => {
-    const delivered = sendBrowserNotification("WaktuAI - Tes Notifikasi", "Notifikasi aktif saat aplikasi terbuka atau PWA aktif.");
-    answer(delivered ? "Notifikasi tes dikirim." : "Notifikasi browser belum aktif. Fallback in-app ditampilkan.");
-    showToast(delivered ? "Notifikasi tes dikirim." : "Notifikasi browser belum aktif. Fallback in-app ditampilkan.");
-    setNotificationState(getNotificationPermissionState());
+  const sendTestNotification = () => {
+    const sent = createNotification("WaktuAI - Tes Notifikasi", "Jika muncul, notifikasi web aktif saat aplikasi terbuka.");
+    setLastTestResult(sent ? "Tes berhasil dikirim." : "Tes memakai fallback in-app. Periksa izin notifikasi.");
+    addToast(sent ? "Notifikasi tes dikirim." : "Fallback in-app ditampilkan. Izin browser belum granted.", sent ? "success" : "info");
+    addLog({ type: "test", title: "Test notification sent", status: sent ? "success" : "skipped", reason: sent ? "Browser notification sent" : "In-app fallback only" });
   };
 
-  const disableNotifications = () => {
-    setPreferences((prefs) => ({ ...prefs, enabled: false }));
-    setPrayerBanner(null);
-    answer("Semua notifikasi sholat dari WaktuAI dimatikan.");
-    showToast("Semua notifikasi sholat dari WaktuAI dimatikan.");
+  const scheduleOneMinuteTest = () => {
+    const date = new Date(Date.now() + 60_000);
+    const reminder: Reminder = {
+      id: `${Date.now()}-test`,
+      title: "Tes pengingat 1 menit WaktuAI",
+      dateTime: date.toISOString(),
+      status: "scheduled",
+      createdAt: new Date().toISOString(),
+      repeat: "once",
+      firedKeys: [],
+      snoozeCount: 0,
+      history: ["Tes 1 menit dijadwalkan"],
+    };
+    setReminders((items) => [reminder, ...items]);
+    addToast("Tes 1 menit dijadwalkan. Biarkan WaktuAI tetap terbuka.", "success");
+    addLog({ type: "reminder", title: "Scheduled 1 minute test", status: "success" });
   };
 
   const testVoice = () => {
-    const spoken = speakIndonesian("Halo, ini suara WaktuAI. Pengingat sholat aktif.");
-    setAssistantText(spoken ? "Tes suara AI diputar." : "SpeechSynthesis tidak didukung browser ini.");
-    showToast(spoken ? "Tes suara AI diputar." : "SpeechSynthesis tidak didukung browser ini.");
+    if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+      setLastVoiceResult("SpeechSynthesis tidak didukung browser ini.");
+      addToast("Browser ini belum mendukung suara AI.", "error");
+      return;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance("Halo, ini suara WaktuAI. Pengingat sholat aktif.");
+      const voices = window.speechSynthesis.getVoices();
+      const idVoice = voices.find((item) => item.lang.toLowerCase().startsWith("id"));
+      if (idVoice) utterance.voice = idVoice;
+      utterance.lang = idVoice?.lang ?? "id-ID";
+      utterance.rate = voice.rate === "slow" ? 0.85 : voice.rate === "fast" ? 1.15 : 1;
+      window.speechSynthesis.speak(utterance);
+      setVoice((current) => ({ ...current, enabled: true }));
+      setLastVoiceResult("Suara AI dites. Jika tidak terdengar, browser mungkin memblokir autoplay sampai ada interaksi.");
+      addToast("Tes suara AI dijalankan.", "success");
+      addLog({ type: "voice", title: "Voice AI test", status: "success" });
+    } catch {
+      setLastVoiceResult("Suara gagal diputar di browser ini.");
+      addToast("Suara AI gagal diputar.", "error");
+    }
   };
 
-  const createReminder = (input: string) => {
-    const parsed = parseReminderInput(input, { prayerTimes: prayerTimeMap });
-    answer(parsed.response);
-    if (parsed.ok) {
-      setReminders((items) => [...items, parsed.reminder]);
-      showToast(parsed.response);
-    } else {
-      showToast(parsed.response);
+  const playBeep = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) throw new Error("AudioContext unavailable");
+      const ctx = new AudioContextClass();
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 660;
+      gain.gain.value = 0.08;
+      oscillator.connect(gain);
+      gain.connect(ctx.destination);
+      oscillator.start();
+      oscillator.stop(ctx.currentTime + 0.18);
+      addToast("Beep tes diputar.", "success");
+    } catch {
+      addToast("Audio web dibatasi browser ini. Tes Suara AI tetap bisa dicoba.", "error");
     }
   };
 
-  function runCommand(input: string) {
-    const parsed = parseVoiceCommand(input);
-    setCommand(input);
-    if (parsed.intent === "HELP") {
-      setShowHelp(true);
-      answer("Tenang, aku bantu. Kamu bisa pakai WaktuAI untuk tanya jam, jadwal sholat, arah kiblat, reminder, notifikasi sholat, dan hitung rakaat.");
-      return;
-    }
-    if (parsed.intent === "ASK_TIME") {
-      answer(`Sekarang jam ${formatHHMM(new Date())}.`);
-      return;
-    }
-    if (parsed.intent === "PRAYER_SCHEDULE") {
-      answer(prayerTimes.map((item) => `${item.name} ${item.time}`).join(" | "));
-      return;
-    }
-    if (parsed.intent === "QIBLA") {
-      answer("Arah kiblat perlu kompas perangkat dan izin sensor. Jika sensor tidak tersedia, gunakan aplikasi kompas lalu arahkan sekitar 295 derajat dari Jakarta.");
-      return;
-    }
-    if (parsed.intent === "TEST_NOTIFICATION") {
-      sendTest();
-      return;
-    }
-    if (parsed.intent === "TEST_AI_VOICE") {
-      testVoice();
-      return;
-    }
-    if (parsed.intent === "ENABLE_PRAYER_NOTIFICATIONS") {
-      void enableNotifications();
-      return;
-    }
-    if (parsed.intent === "DISABLE_PRAYER_NOTIFICATIONS") {
-      disableNotifications();
-      return;
-    }
-    if (parsed.intent === "ENABLE_STRONG_REMINDER") {
-      setPreferences((prefs) => ({ ...prefs, reminderMode: "strong" }));
-      answer("Mode Pengingat Berulang diatur ke Strong. Maksimal 4 notifikasi per sholat.");
-      return;
-    }
-    if (parsed.intent === "DISABLE_STRONG_REMINDER") {
-      setPreferences((prefs) => ({ ...prefs, reminderMode: "off" }));
-      answer("Mode Pengingat Berulang dimatikan.");
-      return;
-    }
-    if (parsed.intent === "CREATE_EXACT_TIME_REMINDER" && parsed.reminderText) {
-      createReminder(parsed.reminderText);
-      return;
-    }
-    if (parsed.intent === "START_RAKAAT_DETECTION") {
-      document.getElementById("rakaat")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      answer("Buka kartu Deteksi Rakaat lalu tekan Mulai Deteksi. Hitung manual tetap bisa dipakai kapan saja.");
-      return;
-    }
-    if (parsed.intent === "FALLBACK_MANUAL_RAKAAT") {
-      document.getElementById("rakaat")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      answer("Mode manual tersedia di kartu Deteksi Rakaat: tambah, kurang, reset, target 2/3/4, dan selesai rakaat.");
-      return;
-    }
-    answer("Aku belum paham perintah itu. Coba salah satu tombol saran di bawah.");
-    setShowHelp(true);
-  }
-
-  const submitCommand = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    runCommand(command);
+  const markPrayerDone = (name: PrayerName) => {
+    setTracker((current) => {
+      const existing = current[todayKey] ?? [];
+      return existing.includes(name) ? current : { ...current, [todayKey]: [...existing, name] };
+    });
+    if (prayerBanner?.prayer === name) setPrayerBanner(null);
+    addToast(`${name} ditandai selesai.`, "success");
   };
 
-  const updatePrayerTime = (name: PrayerName, time: string) => {
-    setPrayerTimes((items) => items.map((item) => (item.name === name ? { ...item, time } : item)));
-  };
-
-  const markPrayerDone = (prayer: PrayerName) => {
-    setCompletedPrayerKeys((keys) => [...new Set([...keys, `${today}-${prayer}`])]);
-    setPrayerBanner(null);
-    showToast(`${prayer} ditandai sudah sholat.`);
-  };
-
-  const snoozePrayer = (prayer: PrayerName) => {
-    const target = new Date();
-    target.setMinutes(target.getMinutes() + 10);
+  const snoozePrayer = (minutes: 5 | 10 | 15) => {
+    if (!prayerBanner) return;
+    const date = new Date(Date.now() + minutes * 60_000);
     const reminder: Reminder = {
-      id: `snooze-${prayer}-${Date.now()}`,
-      title: `Tunda sholat ${prayer}`,
-      dateTime: target.toISOString(),
+      id: `${Date.now()}-${prayerBanner.prayer}-snooze`,
+      title: `Tunda pengingat ${prayerBanner.prayer}`,
+      dateTime: date.toISOString(),
+      status: "scheduled",
       createdAt: new Date().toISOString(),
-      alarmMode: false,
-      repeatCount: 0,
-      done: false
+      repeat: "once",
+      firedKeys: [],
+      snoozeCount: 1,
+      history: [`Ditunda ${minutes} menit`],
     };
-    setReminders((items) => [...items, reminder]);
+    setReminders((items) => [reminder, ...items]);
     setPrayerBanner(null);
-    showToast(`${prayer} ditunda 10 menit.`);
+    addToast(`Pengingat ${prayerBanner.prayer} ditunda ${minutes} menit.`, "success");
   };
 
-  const disablePrayerToday = (prayer: PrayerName) => {
-    setDisabledTodayKeys((keys) => [...new Set([...keys, `${today}-${prayer}`])]);
-    setPrayerBanner(null);
-    showToast(`Pengingat ${prayer} dimatikan untuk hari ini.`);
+  const addReminderFromText = (text: string) => {
+    const parsed = parseReminderInput(text, new Date(), schedule?.timings ?? {}, timeFormat);
+    if (!parsed) {
+      addToast("Aku belum paham waktu reminder itu. Coba: ingatkan aku 17:46.", "error");
+      return;
+    }
+    setReminders((items) => [parsed.reminder, ...items]);
+    setReminderInput("");
+    setAssistantReply(parsed.response);
+    addToast(parsed.response, "success");
+    addLog({ type: "reminder", title: parsed.reminder.title, status: "success", reason: "Reminder scheduled" });
   };
 
-  const markReminderDone = (id: string) => {
-    setReminders((items) => items.map((item) => (item.id === id ? { ...item, done: true } : item)));
-    setReminderBanner(null);
-  };
-
-  const snoozeReminder = (id: string) => {
+  const snoozeReminder = (id: string, minutes: 5 | 10 | 15) => {
     setReminders((items) =>
-      items.map((item) => {
-        if (item.id !== id) return item;
-        const next = new Date();
-        next.setMinutes(next.getMinutes() + 10);
-        return { ...item, dateTime: next.toISOString(), done: false, repeatCount: 0 };
-      })
+      items.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              dateTime: new Date(Date.now() + minutes * 60_000).toISOString(),
+              status: "scheduled",
+              snoozeCount: clampNumber(item.snoozeCount + 1, 0, 3),
+              history: [...item.history, `Ditunda ${minutes} menit`].slice(-12),
+            }
+          : item,
+      ),
     );
-    setSentReminderIds((ids) => ids.filter((item) => !item.startsWith(`${id}:`)));
     setReminderBanner(null);
-    showToast("Reminder ditunda 10 menit.");
+    addToast(`Reminder ditunda ${minutes} menit.`, "success");
   };
 
   const deleteReminder = (id: string) => {
     setReminders((items) => items.filter((item) => item.id !== id));
-    setSentReminderIds((ids) => ids.filter((item) => !item.startsWith(`${id}:`)));
+    if (reminderBanner?.reminderId === id) setReminderBanner(null);
+    addToast("Reminder dihapus.", "success");
+  };
+
+  const completeReminder = (id: string) => {
+    setReminders((items) => items.map((item) => (item.id === id ? { ...item, status: "done" } : item)));
     setReminderBanner(null);
+    addToast("Reminder selesai.", "success");
   };
 
-  const installPwa = async () => {
-    if (!installPrompt) return;
-    await installPrompt.prompt();
-    await installPrompt.userChoice;
-    setInstallPrompt(null);
+  const requestGps = () => {
+    if (!window.isSecureContext) {
+      addToast("Deteksi lokasi membutuhkan HTTPS atau localhost.", "error");
+      return;
+    }
+    if (!navigator.geolocation) {
+      addToast("Browser ini belum mendukung lokasi. Pilih kota manual.", "error");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setCoords({
+          lat: position.coords.latitude,
+          lon: position.coords.longitude,
+          city: "Lokasi GPS",
+          source: "GPS",
+          accuracy: position.coords.accuracy,
+          updatedAt: new Date().toISOString(),
+        });
+        addToast("Lokasi GPS diperbarui.", "success");
+      },
+      (error) => {
+        addToast(error.code === error.PERMISSION_DENIED ? "Izin lokasi ditolak. Kamu tetap bisa pilih kota manual." : "GPS gagal. Pilih kota manual tetap bisa.", "error");
+      },
+      { enableHighAccuracy: true, timeout: 12_000, maximumAge: 300_000 },
+    );
   };
 
-  const micStatus = speech.requesting
-    ? "Meminta izin mikrofon..."
-    : speech.listening
-      ? "Mendengarkan perintah..."
-      : speech.supported
-        ? "Mikrofon siap"
-        : "Mikrofon tidak didukung browser ini";
+  const setManualCity = (city: string) => {
+    const item = cityOptions[city];
+    setCoords({ lat: item.lat, lon: item.lon, city, source: "Manual city", updatedAt: new Date().toISOString() });
+    addToast(`Kota diubah ke ${city}.`, "success");
+  };
+
+  const requestOrientation = async () => {
+    const orientationApi = window.DeviceOrientationEvent as typeof DeviceOrientationEvent & {
+      requestPermission?: () => Promise<"granted" | "denied">;
+    };
+    try {
+      if (orientationApi?.requestPermission) {
+        const result = await orientationApi.requestPermission();
+        if (result !== "granted") {
+          addToast("Izin kompas ditolak. Derajat kiblat tetap ditampilkan.", "error");
+          return;
+        }
+      }
+      addToast("Kompas visual aktif jika sensor tersedia.", "success");
+    } catch {
+      addToast("Sensor kompas tidak tersedia. Derajat kiblat tetap bisa dipakai.", "info");
+    }
+  };
+
+  useEffect(() => {
+    const onOrientation = (event: DeviceOrientationEvent) => {
+      const heading = event.alpha ?? 0;
+      setOrientation(heading);
+    };
+    window.addEventListener("deviceorientation", onOrientation);
+    return () => window.removeEventListener("deviceorientation", onOrientation);
+  }, []);
+
+  const startCamera = async () => {
+    if (safeMode) {
+      setCameraStatus("model-unavailable");
+      addToast("Mode aman aktif. Kamera dinonaktifkan, hitung manual tetap bisa.", "info");
+      return;
+    }
+    if (!window.isSecureContext) {
+      setCameraStatus("insecure");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraStatus("unavailable");
+      return;
+    }
+    setCameraStatus("requesting");
+    try {
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 15, max: 20 },
+          },
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+      }
+      mediaStreamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+      setCameraStatus("active");
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "";
+      setCameraStatus(name === "NotAllowedError" || name === "SecurityError" ? "denied" : "unavailable");
+    }
+  };
+
+  const stopCamera = useCallback(() => {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraStatus("idle");
+  }, []);
+
+  useEffect(() => stopCamera, [stopCamera]);
+
+  const runQuickAction = (action: string) => {
+    const lower = action.toLowerCase();
+    if (lower.includes("jadwal")) setActiveTab("prayer");
+    else if (lower.includes("adzan")) setAssistantReply(nextPrayer ? `Adzan berikutnya ${nextPrayer.name} jam ${formatClock(nextPrayer.date, timeFormat)}.` : "Jadwal belum dimuat.");
+    else if (lower.includes("reminder")) setActiveTab("reminder");
+    else if (lower.includes("kiblat")) setActiveTab("prayer");
+    else if (lower.includes("notifikasi")) sendTestNotification();
+    else if (lower.includes("rakaat")) setActiveTab("rakaat");
+    else if (lower.includes("tasbih")) setActiveTab("prayer");
+  };
+
+  const handleCommand = (text = command) => {
+    const parsed = parseCommand(text);
+    setTroubleshootTopic(null);
+    if (parsed.intent === "HELP") {
+      setAssistantReply("Tenang, aku bantu. Kamu bisa tanya jam, jadwal sholat, arah kiblat, buat reminder, aktifkan notifikasi, hitung rakaat, dan pakai tasbih.");
+    } else if (parsed.intent === "TROUBLESHOOT") {
+      setTroubleshootTopic(parsed.text);
+      setAssistantReply("Aku bantu cek pelan-pelan. Pilih tombol diagnostik yang sesuai.");
+    } else if (parsed.intent === "TEST_NOTIFICATION") sendTestNotification();
+    else if (parsed.intent === "TEST_AI_VOICE") testVoice();
+    else if (parsed.intent === "ENABLE_PRAYER_NOTIFICATIONS") requestNotificationPermission();
+    else if (parsed.intent === "DISABLE_PRAYER_NOTIFICATIONS") {
+      setNotifications((current) => ({ ...current, enabled: false }));
+      addToast("Semua notifikasi sholat dimatikan.", "success");
+    } else if (parsed.intent === "ENABLE_STRONG_REMINDER") setNotifications((current) => ({ ...current, repeatMode: "strong" }));
+    else if (parsed.intent === "DISABLE_STRONG_REMINDER") setNotifications((current) => ({ ...current, repeatMode: "off" }));
+    else if (parsed.intent === "CREATE_REMINDER") addReminderFromText(text);
+    else if (parsed.intent === "QIBLA") setActiveTab("prayer");
+    else if (parsed.intent === "START_RAKAAT_DETECTION") {
+      setActiveTab("rakaat");
+      startCamera();
+    } else if (parsed.intent === "FALLBACK_MANUAL_RAKAAT") setActiveTab("rakaat");
+    else if (parsed.intent === "MARK_PRAYER_DONE") {
+      const found = prayerNames.find((name) => parsed.text.includes(name.toLowerCase()));
+      markPrayerDone(found ?? nextPrayer?.name ?? "Isya");
+    } else if (parsed.intent === "TASBIH") setActiveTab("prayer");
+    else if (parsed.intent === "RESET_TASBIH") setTasbih((current) => ({ ...current, count: 0 }));
+    else if (parsed.intent === "DND_ON") {
+      const until = new Date(Date.now() + (parsed.text.includes("1 jam") ? 60 : 30) * 60_000);
+      setDnd({ enabled: true, until: until.toISOString() });
+      addToast(`Jangan ganggu aktif sampai ${formatClock(until, timeFormat)}.`, "success");
+    } else if (parsed.intent === "DND_OFF") setDnd({ enabled: false, until: null });
+    else if (parsed.intent === "SAFE_MODE") {
+      setSafeMode(true);
+      setNotifications((current) => ({ ...current, repeatMode: "off" }));
+      setVoice((current) => ({ ...current, enabled: false }));
+      stopCamera();
+      addToast("Mode aman aktif. Kamera, suara otomatis, dan pengingat kuat dimatikan.", "success");
+    } else if (parsed.intent === "NEXT_PRAYER") {
+      setAssistantReply(nextPrayer ? `Berikutnya ${nextPrayer.name} jam ${formatClock(nextPrayer.date, timeFormat)}, ${durationText(nextPrayer.date.getTime() - clock.getTime())} lagi.` : "Jadwal belum dimuat.");
+    } else if (parsed.intent === "PRAYER_TIME") {
+      const found = prayerTimes.find((item) => parsed.text.includes(item.name.toLowerCase()));
+      setAssistantReply(found ? `${found.name} jam ${formatClock(found.time, timeFormat)}.` : "Jadwal belum dimuat.");
+    } else {
+      setAssistantReply(`Aku belum paham perintah itu. Coba: ${suggestedCommands.join(", ")}.`);
+    }
+    setCommand("");
+  };
+
+  const exportSettings = async () => {
+    const payload = JSON.stringify(
+      {
+        version: 2,
+        coords,
+        notifications,
+        voice,
+        reminders,
+        tracker,
+        theme,
+        tasbih,
+        dnd,
+        timeFormat,
+        quickActions,
+      },
+      null,
+      2,
+    );
+    try {
+      await navigator.clipboard?.writeText(payload);
+      addToast("Backup disalin ke clipboard.", "success");
+    } catch {
+      setImportText(payload);
+      addToast("Clipboard tidak tersedia. Teks backup ditampilkan di kotak import.", "info");
+    }
+  };
+
+  const importSettings = () => {
+    if (!window.confirm("Import akan menimpa pengaturan lokal WaktuAI. Lanjutkan?")) return;
+    try {
+      const data = JSON.parse(importText) as Partial<{
+        coords: Coordinates;
+        notifications: WebNotificationSettings;
+        voice: VoiceSettings;
+        reminders: Reminder[];
+        tracker: PrayerTracker;
+        theme: ThemeMode;
+        tasbih: TasbihState;
+        dnd: DndSettings;
+        timeFormat: TimeFormat;
+        quickActions: string[];
+      }>;
+      if (data.coords) setCoords(data.coords);
+      if (data.notifications) setNotifications(data.notifications);
+      if (data.voice) setVoice(data.voice);
+      if (Array.isArray(data.reminders)) setReminders(data.reminders);
+      if (data.tracker) setTracker(data.tracker);
+      if (data.theme) setTheme(data.theme);
+      if (data.tasbih) setTasbih(data.tasbih);
+      if (data.dnd) setDnd(data.dnd);
+      if (data.timeFormat) setTimeFormat(data.timeFormat);
+      if (Array.isArray(data.quickActions)) setQuickActions(data.quickActions);
+      addToast("Pengaturan berhasil diimport.", "success");
+    } catch {
+      addToast("JSON import tidak valid.", "error");
+    }
+  };
+
+  const resetAllSettings = () => {
+    if (!window.confirm("Reset semua pengaturan WaktuAI di browser ini?")) return;
+    Object.keys(localStorage).filter((key) => key.startsWith("waktuai.")).forEach((key) => localStorage.removeItem(key));
+    window.location.reload();
+  };
+
+  const addDailyNote = () => {
+    const text = newNote.trim();
+    if (!text) return;
+    setNotes((current) => ({
+      ...current,
+      [todayKey]: [{ id: `${Date.now()}`, text, done: false }, ...(current[todayKey] ?? [])],
+    }));
+    setNewNote("");
+  };
+
+  const cameraMessage = {
+    idle: "Kamera belum aktif.",
+    requesting: "Meminta izin kamera.",
+    active: "Kamera aktif. Deteksi otomatis belum tersedia di browser/perangkat ini. Hitung manual tetap bisa digunakan.",
+    denied: "Izin kamera ditolak. Hitung rakaat manual tetap bisa dipakai.",
+    unavailable: "Kamera tidak tersedia. Hitung manual tetap bisa dipakai.",
+    "model-unavailable": "Deteksi otomatis belum tersedia di browser/perangkat ini. Hitung manual tetap bisa digunakan.",
+    insecure: "Kamera hanya bisa dipakai di HTTPS atau localhost.",
+  }[cameraStatus];
+
+  const notificationStatusText =
+    notificationPermission === "unsupported" ? "unsupported" : notificationPermission === "granted" && notifications.enabled ? "aktif" : notificationPermission;
 
   return (
-    <main className="app">
-      <section className="hero">
+    <div className="min-h-screen bg-page pb-28 text-ink md:pb-8">
+      {!isOnline ? (
+        <div className="sticky top-0 z-40 bg-amber-500 px-4 py-2 text-center text-sm font-semibold text-amber-950">Offline - memakai data terakhir</div>
+      ) : null}
+
+      <header className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 py-4">
         <div>
-          <p className="eyebrow">WaktuAI</p>
-          <h1>Asisten sholat, reminder, dan hitung rakaat</h1>
-          <p>Notifikasi bekerja saat aplikasi dibuka atau aktif sebagai PWA. Untuk push saat aplikasi benar-benar tertutup, dibutuhkan backend Web Push khusus.</p>
+          <p className="text-sm font-semibold text-brand">WaktuAI Web</p>
+          <h1 className="text-2xl font-black tracking-normal">Asisten Sholat</h1>
         </div>
-        <div className="hero-actions">
-          <button onClick={() => runCommand("Aku bingung")}>Buka Bantuan</button>
-          <button className="secondary" onClick={() => document.getElementById("settings")?.scrollIntoView({ behavior: "smooth" })}>Pengaturan</button>
+        <Button variant="soft" onClick={() => setActiveTab("settings")} aria-label="Buka pengaturan">
+          {notificationStatusText}
+        </Button>
+      </header>
+
+      <main className="mx-auto grid w-full max-w-5xl gap-4 px-4">
+        {activeTab === "home" ? (
+          <HomeTab
+            clock={clock}
+            nextPrayer={nextPrayer}
+            schedule={schedule}
+            scheduleStatus={scheduleStatus}
+            completedToday={completedToday}
+            reminders={reminders}
+            notificationStatus={notificationStatusText}
+            voice={voice}
+            dailyReminderText={dailyReminderText}
+            command={command}
+            setCommand={setCommand}
+            handleCommand={handleCommand}
+            assistantReply={assistantReply}
+            troubleshootTopic={troubleshootTopic}
+            runQuickAction={runQuickAction}
+            quickActions={quickActions}
+            setActiveTab={setActiveTab}
+            markPrayerDone={markPrayerDone}
+            fetchPrayerSchedule={fetchPrayerSchedule}
+            timeFormat={timeFormat}
+            qibla={qibla}
+            rakaatTarget={rakaat.target}
+            stats={stats}
+            dismissedTips={dismissedTips}
+            setDismissedTips={setDismissedTips}
+            requestNotificationPermission={requestNotificationPermission}
+            testVoice={testVoice}
+            sendTestNotification={sendTestNotification}
+            requestGps={requestGps}
+          />
+        ) : null}
+
+        {activeTab === "prayer" ? (
+          <PrayerTab
+            schedule={schedule}
+            scheduleStatus={scheduleStatus}
+            fetchPrayerSchedule={fetchPrayerSchedule}
+            completedToday={completedToday}
+            markPrayerDone={markPrayerDone}
+            tracker={tracker}
+            stats={stats}
+            notifications={notifications}
+            setNotifications={setNotifications}
+            coords={coords}
+            requestGps={requestGps}
+            setManualCity={setManualCity}
+            qibla={qibla}
+            orientation={orientation}
+            requestOrientation={requestOrientation}
+            tasbih={tasbih}
+            setTasbih={setTasbih}
+            timeFormat={timeFormat}
+          />
+        ) : null}
+
+        {activeTab === "reminder" ? (
+          <ReminderTab
+            reminderInput={reminderInput}
+            setReminderInput={setReminderInput}
+            addReminderFromText={addReminderFromText}
+            reminders={reminders}
+            deleteReminder={deleteReminder}
+            completeReminder={completeReminder}
+            snoozeReminder={snoozeReminder}
+            timeFormat={timeFormat}
+            notes={notes[todayKey] ?? []}
+            newNote={newNote}
+            setNewNote={setNewNote}
+            addDailyNote={addDailyNote}
+            setNotes={setNotes}
+            todayKey={todayKey}
+          />
+        ) : null}
+
+        {activeTab === "rakaat" ? (
+          <RakaatTab
+            rakaat={rakaat}
+            setRakaat={setRakaat}
+            cameraStatus={cameraStatus}
+            cameraMessage={cameraMessage}
+            startCamera={startCamera}
+            stopCamera={stopCamera}
+            videoRef={videoRef}
+          />
+        ) : null}
+
+        {activeTab === "settings" ? (
+          <SettingsTab
+            notificationPermission={notificationPermission}
+            requestNotificationPermission={requestNotificationPermission}
+            sendTestNotification={sendTestNotification}
+            scheduleOneMinuteTest={scheduleOneMinuteTest}
+            testVoice={testVoice}
+            lastTestResult={lastTestResult}
+            lastVoiceResult={lastVoiceResult}
+            schedulerStatus={scheduler.schedulerStatus}
+            lastCheckAt={scheduler.lastCheckAt}
+            schedulerRunCheck={scheduler.runCheck}
+            notifications={notifications}
+            setNotifications={setNotifications}
+            voice={voice}
+            setVoice={setVoice}
+            playBeep={playBeep}
+            coords={coords}
+            requestGps={requestGps}
+            setManualCity={setManualCity}
+            method={method}
+            setMethod={setMethod}
+            theme={theme}
+            setTheme={setTheme}
+            timeFormat={timeFormat}
+            setTimeFormat={setTimeFormat}
+            dnd={dnd}
+            setDnd={setDnd}
+            quickActions={quickActions}
+            setQuickActions={setQuickActions}
+            safeMode={safeMode}
+            setSafeMode={setSafeMode}
+            history={history}
+            setHistory={setHistory}
+            importText={importText}
+            setImportText={setImportText}
+            exportSettings={exportSettings}
+            importSettings={importSettings}
+            resetAllSettings={resetAllSettings}
+            installPrompt={installPrompt}
+            setInstallPrompt={setInstallPrompt}
+            addToast={addToast}
+            reminders={reminders}
+            setReminders={setReminders}
+            setTracker={setTracker}
+            setCoords={setCoords}
+          />
+        ) : null}
+      </main>
+
+      <BottomNav activeTab={activeTab} setActiveTab={setActiveTab} />
+
+      {prayerBanner ? (
+        <div className="fixed inset-x-3 bottom-24 z-50 mx-auto max-w-lg rounded-2xl border border-line bg-panel p-3 shadow-soft md:bottom-4">
+          <p className="font-bold">{prayerBanner.message}</p>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <Button variant="primary" onClick={() => markPrayerDone(prayerBanner.prayer)}>Sudah Sholat</Button>
+            <Button onClick={() => snoozePrayer(10)}>Tunda 10</Button>
+            <Button onClick={() => setPrayerBanner(null)}>Matikan Ini</Button>
+          </div>
         </div>
-      </section>
+      ) : null}
 
-      <section className="panel assistant-panel !overflow-visible">
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_220px] lg:items-start">
-          <div className="min-w-0">
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <span className="status-pill">{micStatus}</span>
-              {speech.transcript && <span className="status-pill">Terdengar: {speech.transcript}</span>}
-            </div>
-            <form onSubmit={submitCommand} className="command-form">
-              <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Contoh: ingatkan aku 17:46" aria-label="Perintah WaktuAI" />
-              <button type="submit">Jalankan</button>
-            </form>
-            {speech.interimTranscript && <p className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-3 text-sm text-[var(--text)]">Mendengar: {speech.interimTranscript}</p>}
-            {speech.error && <p className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--warning-bg)] p-3 text-sm text-[var(--warning)]">{speech.error}</p>}
-          </div>
-
-          <div className="grid gap-3 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-4 text-center">
-            <button
-              type="button"
-              className={`mx-auto grid h-24 w-24 place-items-center rounded-full text-base font-black shadow-xl transition ${speech.listening ? "animate-pulse bg-red-500 text-white" : "bg-[var(--primary)] text-white"}`}
-              onClick={() => {
-                if (speech.listening) speech.stop();
-                else void speech.start();
-              }}
-              disabled={speech.requesting || !speech.supported}
-              aria-label={speech.listening ? "Stop mikrofon" : "Mulai mikrofon"}
-            >
-              {speech.listening ? "STOP" : "MIC"}
-            </button>
-            <p className="text-sm font-semibold text-[var(--text)]">{micStatus}</p>
-            <div className="grid grid-cols-2 gap-2">
-              <button className="secondary" type="button" onClick={() => { void speech.retry(); }} disabled={speech.requesting || !speech.supported}>Coba Lagi</button>
-              <button className="secondary" type="button" onClick={() => { void speech.runDiagnostic(); }}>Cek Mic</button>
-            </div>
+      {reminderBanner ? (
+        <div className="fixed inset-x-3 bottom-24 z-50 mx-auto max-w-lg rounded-2xl border border-line bg-panel p-3 shadow-soft md:bottom-4">
+          <p className="font-bold">{reminderBanner.title}</p>
+          <p className="text-sm text-muted">{reminderBanner.message}</p>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <Button variant="primary" onClick={() => completeReminder(reminderBanner.reminderId)}>Selesai</Button>
+            <Button onClick={() => snoozeReminder(reminderBanner.reminderId, 10)}>Tunda 10</Button>
+            <Button onClick={() => deleteReminder(reminderBanner.reminderId)}>Hapus</Button>
           </div>
         </div>
+      ) : null}
 
-        {speech.diagnostics.length > 0 && (
-          <div className="mt-4 grid gap-2 sm:grid-cols-2">
-            {speech.diagnostics.map((item) => (
-              <div key={item.label} className="rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-3 text-sm">
-                <strong>{item.ok ? "OK" : "Perlu dicek"} - {item.label}</strong>
-                <p className="mt-1 text-[var(--muted)]">{item.detail}</p>
-              </div>
-            ))}
+      <div className="fixed right-3 top-3 z-50 grid gap-2">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`max-w-[min(360px,calc(100vw-24px))] rounded-xl px-4 py-3 text-sm font-semibold shadow-soft ${
+              toast.tone === "success" ? "bg-emerald-600 text-white" : toast.tone === "error" ? "bg-rose-600 text-white" : "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-950"
+            }`}
+          >
+            {toast.message}
           </div>
-        )}
-
-        <p className="assistant-text mt-4 rounded-lg border border-[var(--border)] bg-[var(--panel-soft)] p-4 text-base" aria-live="polite">{assistantText}</p>
-        {showHelp && <HelpCards onRunCommand={runCommand} />}
-      </section>
-
-      <div className="layout-grid">
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Jadwal sholat</p>
-              <h2>Jadwal hari ini</h2>
-            </div>
-          </div>
-          <div className="prayer-list">
-            {prayerTimes.map((prayer) => (
-              <label key={prayer.name} className="prayer-row">
-                <span>{prayer.name}</span>
-                <input type="time" value={prayer.time} onChange={(event) => updatePrayerTime(prayer.name, event.target.value)} />
-                <input
-                  type="checkbox"
-                  checked={preferences.prayers[prayer.name]}
-                  onChange={(event) => setPreferences((prefs) => ({ ...prefs, prayers: { ...prefs.prayers, [prayer.name]: event.target.checked } }))}
-                  aria-label={`Aktifkan ${prayer.name}`}
-                />
-              </label>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel" id="settings">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Notifikasi</p>
-              <h2>Pengingat sholat dan suara</h2>
-            </div>
-            <span className="status-pill">{notificationState}</span>
-          </div>
-          <p className="notice">Notifikasi WaktuAI bekerja paling baik saat aplikasi dibuka atau dipasang sebagai PWA. Untuk push notifikasi saat aplikasi benar-benar tertutup, dibutuhkan backend Web Push khusus.</p>
-          {notificationState === "denied" && <p className="notice warning">Izin notifikasi ditolak. Aktifkan lagi dari pengaturan browser.</p>}
-          <div className="button-row">
-            <button onClick={enableNotifications}>Aktifkan Notifikasi Sholat</button>
-            <button className="secondary" onClick={sendTest}>Kirim Notifikasi Tes</button>
-            <button className="secondary" onClick={disableNotifications}>Matikan Semua Notifikasi</button>
-          </div>
-          <div className="settings-grid">
-            <label>
-              Pre-reminder
-              <select value={preferences.preReminderMinutes} onChange={(event) => setPreferences((prefs) => ({ ...prefs, preReminderMinutes: Number(event.target.value) as 0 | 5 | 10 | 15 }))}>
-                <option value={0}>Off</option>
-                <option value={5}>5 menit</option>
-                <option value={10}>10 menit</option>
-                <option value={15}>15 menit</option>
-              </select>
-            </label>
-            <label>
-              Mode Pengingat Berulang
-              <select value={preferences.reminderMode} onChange={(event) => setPreferences((prefs) => ({ ...prefs, reminderMode: event.target.value as PrayerNotificationPreferences["reminderMode"] }))}>
-                <option value="off">Off</option>
-                <option value="gentle">Gentle</option>
-                <option value="strong">Strong</option>
-              </select>
-            </label>
-            <label className="toggle-row">
-              <input type="checkbox" checked={preferences.voiceEnabled} onChange={(event) => setPreferences((prefs) => ({ ...prefs, voiceEnabled: event.target.checked }))} />
-              Suara AI untuk semua jawaban dan pengingat
-            </label>
-            <label className="toggle-row">
-              <input type="checkbox" checked={preferences.doNotDisturb} onChange={(event) => setPreferences((prefs) => ({ ...prefs, doNotDisturb: event.target.checked }))} />
-              Do Not Disturb
-            </label>
-          </div>
-          <div className="button-row">
-            <button className="secondary" onClick={testVoice}>Tes Suara AI</button>
-            {installPrompt && <button className="secondary" onClick={installPwa}>Pasang PWA</button>}
-          </div>
-        </section>
+        ))}
       </div>
 
-      <section className="panel">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Custom reminder</p>
-            <h2>Reminder dan alarm lokal</h2>
-          </div>
-        </div>
-        <form className="command-form" onSubmit={(event) => {
-          event.preventDefault();
-          createReminder(command);
-        }}>
-          <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="Contoh: alarm 04:30 atau ingatkan aku 10 menit lagi" />
-          <button type="submit">Tambah Reminder</button>
-        </form>
-        <div className="reminder-list">
-          {reminders.filter((item) => !item.done).map((reminder) => (
-            <div key={reminder.id} className="reminder-row">
-              <div>
-                <strong>{reminder.title}</strong>
-                <span>{toLocalDateTimeText(reminder.dateTime)}{reminder.alarmMode ? " - alarm" : ""}</span>
-              </div>
-              <button className="secondary" onClick={() => deleteReminder(reminder.id)}>Hapus</button>
-            </div>
-          ))}
-          {reminders.filter((item) => !item.done).length === 0 && <p className="muted">Belum ada reminder aktif.</p>}
-        </div>
-      </section>
-
-      <RakaatCard />
-      <CommandCenter onRunCommand={runCommand} />
-
-      {prayerBanner && (
-        <div className="sticky-banner" role="status">
-          <strong>{prayerBanner.message}</strong>
-          <div className="button-row">
-            <button onClick={() => markPrayerDone(prayerBanner.prayer)}>Sudah Sholat</button>
-            <button className="secondary" onClick={() => snoozePrayer(prayerBanner.prayer)}>Tunda 10 Menit</button>
-            <button className="secondary" onClick={() => disablePrayerToday(prayerBanner.prayer)}>Matikan Hari Ini</button>
-          </div>
-        </div>
-      )}
-
-      {reminderBanner && (
-        <div className="sticky-banner reminder" role="status">
-          <strong>{reminderBanner.message}</strong>
-          <div className="button-row">
-            <button onClick={() => markReminderDone(reminderBanner.reminder.id)}>Selesai</button>
-            <button className="secondary" onClick={() => snoozeReminder(reminderBanner.reminder.id)}>Tunda 10 Menit</button>
-            <button className="secondary" onClick={() => deleteReminder(reminderBanner.reminder.id)}>Hapus Reminder</button>
-          </div>
-        </div>
-      )}
-
-      <div className="toast-stack" aria-live="polite">
-        {toasts.map((toast) => <div key={toast.id} className="toast">{toast.message}</div>)}
-      </div>
-    </main>
+      {!onboardingDone ? (
+        <Onboarding
+          requestGps={requestGps}
+          requestNotificationPermission={requestNotificationPermission}
+          testVoice={testVoice}
+          finish={() => setOnboardingDone(true)}
+          skip={() => setOnboardingDone(true)}
+        />
+      ) : null}
+    </div>
   );
 }
 
-export default App;
+function HomeTab(props: {
+  clock: Date;
+  nextPrayer: (PrayerTime & { date: Date }) | null;
+  schedule: PrayerSchedule | null;
+  scheduleStatus: string;
+  completedToday: PrayerName[];
+  reminders: Reminder[];
+  notificationStatus: string;
+  voice: VoiceSettings;
+  dailyReminderText: string;
+  command: string;
+  setCommand: (value: string) => void;
+  handleCommand: (text?: string) => void;
+  assistantReply: string | null;
+  troubleshootTopic: string | null;
+  runQuickAction: (action: string) => void;
+  quickActions: string[];
+  setActiveTab: (tab: Tab) => void;
+  markPrayerDone: (name: PrayerName) => void;
+  fetchPrayerSchedule: () => void;
+  timeFormat: TimeFormat;
+  qibla: number;
+  rakaatTarget: number;
+  stats: ReturnType<typeof monthlyStats>;
+  dismissedTips: string[];
+  setDismissedTips: React.Dispatch<React.SetStateAction<string[]>>;
+  requestNotificationPermission: () => void;
+  testVoice: () => void;
+  sendTestNotification: () => void;
+  requestGps: () => void;
+}) {
+  const next = props.nextPrayer;
+  const progress = props.completedToday.length;
+  const tip = [
+    "Kamu bisa ketik: ingatkan aku 17:46",
+    "Tekan Tes Notifikasi untuk memastikan alarm aktif.",
+    "Kalau kamera gagal, hitung rakaat manual tetap bisa dipakai.",
+    "Arah kiblat tetap muncul meski kompas tidak tersedia.",
+  ].find((item) => !props.dismissedTips.includes(item));
+  return (
+    <>
+      <section className="card overflow-hidden bg-gradient-to-br from-teal-700 to-slate-900 text-white dark:from-teal-800 dark:to-slate-950">
+        {next ? (
+          <>
+            <p className="text-sm font-semibold text-teal-100">Menuju {next.name}</p>
+            <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <p className="text-5xl font-black">{formatClock(next.date, props.timeFormat)}</p>
+                <p className="mt-2 text-2xl font-bold">{durationText(next.date.getTime() - props.clock.getTime())} lagi</p>
+              </div>
+              <p className="rounded-full bg-white/15 px-3 py-2 text-sm">{props.schedule?.city ?? "Jakarta"} - {props.schedule?.source ?? "Default Jakarta"}</p>
+            </div>
+            <div className="mt-5 grid grid-cols-3 gap-2">
+              <Button variant="primary" className="bg-white text-teal-900" onClick={() => props.markPrayerDone(next.name)}>Sudah Sholat</Button>
+              <Button className="border-white/20 bg-white/10 text-white" onClick={() => props.handleCommand("tunda 10 menit")}>Tunda</Button>
+              <Button className="border-white/20 bg-white/10 text-white" onClick={() => props.setActiveTab("prayer")}>Jadwal</Button>
+            </div>
+          </>
+        ) : (
+          <div>
+            <h2 className="text-2xl font-black">Jadwal belum dimuat</h2>
+            <p className="mt-2 text-teal-100">Muat jadwal sholat untuk melihat adzan berikutnya.</p>
+            <Button className="mt-4 bg-white text-teal-900" onClick={props.fetchPrayerSchedule}>Muat Jadwal Sholat</Button>
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Ringkasan Hari Ini" subtitle={props.dailyReminderText} />
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <StatusItem label="Jam" value={formatClock(props.clock, props.timeFormat)} />
+          <StatusItem label="Sholat" value={`${progress}/5 selesai`} />
+          <StatusItem label="Reminder" value={`${props.reminders.filter((item) => item.status === "scheduled").length} aktif`} />
+          <StatusItem label="Notifikasi" value={props.notificationStatus} />
+          <StatusItem label="Suara AI" value={props.voice.enabled ? "aktif" : "nonaktif"} />
+          <StatusItem label="Kiblat" value={`${Math.round(props.qibla)}°`} />
+        </div>
+        <div className="mt-4 h-3 overflow-hidden rounded-full bg-line">
+          <div className="h-full rounded-full bg-brand" style={{ width: `${progress * 20}%` }} />
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          {progress === 0 ? "Yuk mulai hari ini pelan-pelan." : progress < 3 ? "Bagus, lanjutkan ya." : progress < 5 ? "Sedikit lagi lengkap." : "MasyaAllah, lengkap hari ini."}
+        </p>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Widget Cepat" />
+        <div className="grid grid-cols-2 gap-3">
+          <StatusItem label="Sekarang" value={formatClock(props.clock, props.timeFormat)} />
+          <StatusItem label="Berikutnya" value={next ? next.name : "-"} />
+          <StatusItem label="Countdown" value={next ? durationText(next.date.getTime() - props.clock.getTime()) : "-"} />
+          <StatusItem label="Target rakaat" value={`${props.rakaatTarget}`} />
+        </div>
+      </section>
+
+      {tip ? (
+        <section className="card flex items-start justify-between gap-3">
+          <p className="text-sm font-semibold text-ink">{tip}</p>
+          <Button onClick={() => props.setDismissedTips((items) => [...items, tip])}>Tutup</Button>
+        </section>
+      ) : null}
+
+      <section className="card">
+        <SectionTitle title="Perintah Cepat" subtitle="Ketik perintah atau pilih tombol. Mikrofon bukan syarat." />
+        <form
+          className="flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            props.handleCommand();
+          }}
+        >
+          <input className="input" value={props.command} onChange={(event) => props.setCommand(event.target.value)} placeholder="Contoh: ingatkan aku 17:46" aria-label="Perintah WaktuAI" />
+          <Button variant="primary" type="submit">Kirim</Button>
+        </form>
+        {props.assistantReply ? <p className="mt-3 rounded-xl bg-brandSoft p-3 text-sm font-semibold text-teal-950 dark:text-teal-50">{props.assistantReply}</p> : null}
+        {props.troubleshootTopic ? (
+          <TroubleshootingCards
+            topic={props.troubleshootTopic}
+            requestNotificationPermission={props.requestNotificationPermission}
+            testVoice={props.testVoice}
+            sendTestNotification={props.sendTestNotification}
+            requestGps={props.requestGps}
+            openTab={props.setActiveTab}
+          />
+        ) : null}
+        <CommandCenter runCommand={props.handleCommand} />
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Aksi Favorit" />
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {props.quickActions.map((action) => (
+            <Button key={action} onClick={() => props.runQuickAction(action)}>{action}</Button>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Dashboard Islami" />
+        <div className="grid gap-2 text-sm">
+          <p><span className="font-semibold">Masehi:</span> {displayDate(props.clock)}</p>
+          <p><span className="font-semibold">Hijriah:</span> {props.schedule?.hijri ? `${props.schedule.hijri.day} ${props.schedule.hijri.month} ${props.schedule.hijri.year} H` : "Tanggal Hijriah belum tersedia."}</p>
+          <p><span className="font-semibold">Streak:</span> {props.stats.activeStreak} hari aktif, lengkap 5 sholat selama {props.stats.fullStreak} hari</p>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function StatusItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-line bg-page p-3">
+      <p className="text-xs font-semibold uppercase text-muted">{label}</p>
+      <p className="mt-1 break-words text-base font-bold text-ink">{value}</p>
+    </div>
+  );
+}
+
+function PrayerTab(props: {
+  schedule: PrayerSchedule | null;
+  scheduleStatus: string;
+  fetchPrayerSchedule: () => void;
+  completedToday: PrayerName[];
+  markPrayerDone: (name: PrayerName) => void;
+  tracker: PrayerTracker;
+  stats: ReturnType<typeof monthlyStats>;
+  notifications: WebNotificationSettings;
+  setNotifications: React.Dispatch<React.SetStateAction<WebNotificationSettings>>;
+  coords: Coordinates;
+  requestGps: () => void;
+  setManualCity: (city: string) => void;
+  qibla: number;
+  orientation: number;
+  requestOrientation: () => void;
+  tasbih: TasbihState;
+  setTasbih: React.Dispatch<React.SetStateAction<TasbihState>>;
+  timeFormat: TimeFormat;
+}) {
+  return (
+    <>
+      <section className="card">
+        <SectionTitle title="Jadwal Sholat" subtitle={`Status: ${props.scheduleStatus}`} />
+        {props.schedule ? (
+          <div className="grid gap-2">
+            {prayerNames.map((name) => (
+              <div key={name} className="flex items-center justify-between rounded-xl border border-line bg-page p-3">
+                <div>
+                  <p className="font-bold">{name}</p>
+                  <p className="text-sm text-muted">{formatClock(props.schedule!.timings[name], props.timeFormat)}</p>
+                </div>
+                <Button variant={props.completedToday.includes(name) ? "soft" : "secondary"} onClick={() => props.markPrayerDone(name)}>
+                  {props.completedToday.includes(name) ? "Selesai" : "Sudah Sholat"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-xl bg-page p-3 text-sm text-muted">Belum ada jadwal. Muat jadwal sholat saat online.</p>
+        )}
+        <Button className="mt-3 w-full" onClick={props.fetchPrayerSchedule}>Refresh Jadwal</Button>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Tracker Sholat" subtitle={`${props.completedToday.length}/5 sholat selesai`} />
+        <div className="h-3 overflow-hidden rounded-full bg-line">
+          <div className="h-full bg-brand" style={{ width: `${props.completedToday.length * 20}%` }} />
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <StatusItem label="Bulan ini" value={`${props.stats.total} sholat`} />
+          <StatusItem label="Persentase" value={`${props.stats.percentage}%`} />
+          <StatusItem label="Hari dicatat" value={`${props.stats.daysTracked}`} />
+          <StatusItem label="Hari lengkap" value={`${props.stats.completeDays}`} />
+        </div>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Notifikasi Sholat" subtitle="Web notification bekerja saat WaktuAI terbuka atau PWA aktif." />
+        <label className="flex min-h-11 items-center justify-between gap-3">
+          <span className="font-semibold">Aktifkan notifikasi sholat</span>
+          <input type="checkbox" checked={props.notifications.enabled} onChange={(event) => props.setNotifications((current) => ({ ...current, enabled: event.target.checked }))} />
+        </label>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {prayerNames.map((name) => (
+            <label key={name} className="flex min-h-11 items-center gap-2 rounded-xl border border-line px-3">
+              <input
+                type="checkbox"
+                checked={props.notifications.perPrayer[name]}
+                onChange={(event) => props.setNotifications((current) => ({ ...current, perPrayer: { ...current.perPrayer, [name]: event.target.checked } }))}
+              />
+              {name}
+            </label>
+          ))}
+        </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <FieldLabel>Pre-reminder</FieldLabel>
+            <select className="input" value={props.notifications.preReminder} onChange={(event) => props.setNotifications((current) => ({ ...current, preReminder: Number(event.target.value) as 0 | 5 | 10 | 15 }))}>
+              <option value={0}>Off</option>
+              <option value={5}>5 menit</option>
+              <option value={10}>10 menit</option>
+              <option value={15}>15 menit</option>
+            </select>
+          </div>
+          <div>
+            <FieldLabel>Mode Pengingat Berulang</FieldLabel>
+            <select className="input" value={props.notifications.repeatMode} onChange={(event) => props.setNotifications((current) => ({ ...current, repeatMode: event.target.value as ReminderMode }))}>
+              <option value="off">Off</option>
+              <option value="gentle">Gentle</option>
+              <option value="strong">Strong</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <QiblaCard {...props} />
+      <TasbihCard tasbih={props.tasbih} setTasbih={props.setTasbih} />
+      <HijriMini schedule={props.schedule} />
+    </>
+  );
+}
+
+function QiblaCard(props: {
+  coords: Coordinates;
+  requestGps: () => void;
+  setManualCity: (city: string) => void;
+  qibla: number;
+  orientation: number;
+  requestOrientation: () => void;
+}) {
+  return (
+    <section className="card">
+      <SectionTitle title="Arah Kiblat" subtitle="Arah dihitung dari utara searah jarum jam." />
+      <div className="mx-auto grid h-48 w-48 place-items-center rounded-full border-8 border-line bg-page">
+        <div className="grid h-32 w-32 place-items-center rounded-full bg-brandSoft text-center">
+          <div className="text-3xl font-black text-teal-950 dark:text-teal-50" style={{ transform: `rotate(${props.qibla - props.orientation}deg)` }}>↑</div>
+          <p className="text-sm font-bold text-teal-950 dark:text-teal-50">{Math.round(props.qibla)}°</p>
+        </div>
+      </div>
+      <p className="mt-3 text-sm text-muted">
+        Sumber lokasi: {props.coords.source} - {props.coords.city}. {props.coords.accuracy ? `Akurasi sekitar ${Math.round(props.coords.accuracy)} meter.` : ""}
+      </p>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <Button onClick={props.requestGps}>Deteksi Lokasi</Button>
+        <Button onClick={props.requestOrientation}>Aktifkan Kompas</Button>
+      </div>
+      <select className="input mt-3" value={props.coords.city in cityOptions ? props.coords.city : "Jakarta"} onChange={(event) => props.setManualCity(event.target.value)} aria-label="Pilih kota manual">
+        {Object.keys(cityOptions).map((city) => <option key={city}>{city}</option>)}
+      </select>
+    </section>
+  );
+}
+
+function HijriMini({ schedule }: { schedule: PrayerSchedule | null }) {
+  return (
+    <section className="card">
+      <SectionTitle title="Hijri Mini" subtitle="Tanggal Hijriah bisa berbeda mengikuti ketetapan daerah masing-masing." />
+      <p className="font-bold">{schedule?.hijri ? `${schedule.hijri.day} ${schedule.hijri.month} ${schedule.hijri.year} H` : "Tanggal Hijriah belum tersedia."}</p>
+      <div className="mt-3 grid gap-2 text-sm text-muted">
+        {["1 Muharram", "10 Muharram", "12 Rabiul Awal", "27 Rajab", "1 Ramadan", "17 Ramadan", "1 Syawal", "10 Dzulhijjah"].map((item) => (
+          <p key={item} className="rounded-xl bg-page px-3 py-2">{item}</p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function TasbihCard({ tasbih, setTasbih }: { tasbih: TasbihState; setTasbih: React.Dispatch<React.SetStateAction<TasbihState>> }) {
+  const increment = () => {
+    setTasbih((current) => ({ ...current, count: current.count + 1 }));
+    try {
+      navigator.vibrate?.(15);
+    } catch {
+      // Vibration is optional on the web.
+    }
+  };
+  return (
+    <section className="card">
+      <SectionTitle title="Tasbih" subtitle={`${tasbih.count}/${tasbih.target}`} />
+      <button className="grid min-h-36 w-full place-items-center rounded-2xl bg-brand text-5xl font-black text-white" onClick={increment} aria-label="Tambah hitungan tasbih">
+        {tasbih.count}
+      </button>
+      <div className="mt-3 h-3 overflow-hidden rounded-full bg-line">
+        <div className="h-full bg-brand" style={{ width: `${Math.min(100, (tasbih.count / tasbih.target) * 100)}%` }} />
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        {["Subhanallah", "Alhamdulillah", "Allahu Akbar", "La ilaha illallah"].map((preset) => (
+          <Button key={preset} variant={tasbih.preset === preset ? "soft" : "secondary"} onClick={() => setTasbih((current) => ({ ...current, preset }))}>{preset}</Button>
+        ))}
+      </div>
+      <div className="mt-3 grid grid-cols-4 gap-2">
+        {[33, 99].map((target) => <Button key={target} onClick={() => setTasbih((current) => ({ ...current, target }))}>{target}</Button>)}
+        <Button onClick={() => setTasbih((current) => ({ ...current, target: current.target + 1 }))}>Custom +</Button>
+        <Button onClick={() => setTasbih((current) => ({ ...current, count: 0 }))}>Reset</Button>
+      </div>
+    </section>
+  );
+}
+
+function ReminderTab(props: {
+  reminderInput: string;
+  setReminderInput: (value: string) => void;
+  addReminderFromText: (text: string) => void;
+  reminders: Reminder[];
+  deleteReminder: (id: string) => void;
+  completeReminder: (id: string) => void;
+  snoozeReminder: (id: string, minutes: 5 | 10 | 15) => void;
+  timeFormat: TimeFormat;
+  notes: DailyNote[];
+  newNote: string;
+  setNewNote: (value: string) => void;
+  addDailyNote: () => void;
+  setNotes: React.Dispatch<React.SetStateAction<Record<string, DailyNote[]>>>;
+  todayKey: string;
+}) {
+  const active = props.reminders.filter((item) => item.status === "scheduled");
+  const missed = props.reminders.filter((item) => item.status === "missed" || item.status === "fired");
+  return (
+    <>
+      <section className="card">
+        <SectionTitle title="Tambah Reminder" subtitle="Contoh: 17:46, ingatkan aku 10 menit lagi, ingatkan aku maghrib." />
+        <form
+          className="grid gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            props.addReminderFromText(props.reminderInput);
+          }}
+        >
+          <input className="input" value={props.reminderInput} onChange={(event) => props.setReminderInput(event.target.value)} placeholder="Ingatkan aku 17:46" aria-label="Tulis reminder" />
+          <Button variant="primary" type="submit">Tambah Reminder</Button>
+        </form>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {["10 menit lagi", "30 menit lagi", "1 jam lagi", "17:46"].map((item) => <Button key={item} onClick={() => props.addReminderFromText(item)}>{item}</Button>)}
+        </div>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Reminder Aktif" />
+        {active.length ? (
+          <div className="grid gap-2">
+            {active.map((item) => (
+              <ReminderRow key={item.id} item={item} timeFormat={props.timeFormat} deleteReminder={props.deleteReminder} completeReminder={props.completeReminder} snoozeReminder={props.snoozeReminder} />
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-xl bg-page p-3 text-sm text-muted">Belum ada reminder aktif.</p>
+        )}
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Terlewat dan Riwayat" />
+        {missed.length ? (
+          <div className="grid gap-2">
+            {missed.map((item) => <ReminderRow key={item.id} item={item} timeFormat={props.timeFormat} deleteReminder={props.deleteReminder} completeReminder={props.completeReminder} snoozeReminder={props.snoozeReminder} />)}
+          </div>
+        ) : (
+          <p className="rounded-xl bg-page p-3 text-sm text-muted">Tidak ada reminder terlewat.</p>
+        )}
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Catatan Hari Ini" />
+        <form
+          className="flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            props.addDailyNote();
+          }}
+        >
+          <input className="input" value={props.newNote} onChange={(event) => props.setNewNote(event.target.value)} placeholder="Contoh: Baca Al-Kahfi" aria-label="Catatan harian" />
+          <Button variant="primary" type="submit">Tambah</Button>
+        </form>
+        <div className="mt-3 grid gap-2">
+          {props.notes.length ? props.notes.map((note) => (
+            <div key={note.id} className="flex items-center justify-between gap-2 rounded-xl border border-line bg-page p-3">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={note.done}
+                  onChange={(event) =>
+                    props.setNotes((current) => ({
+                      ...current,
+                      [props.todayKey]: (current[props.todayKey] ?? []).map((item) => (item.id === note.id ? { ...item, done: event.target.checked } : item)),
+                    }))
+                  }
+                />
+                <span className={note.done ? "line-through text-muted" : ""}>{note.text}</span>
+              </label>
+              <Button onClick={() => props.setNotes((current) => ({ ...current, [props.todayKey]: (current[props.todayKey] ?? []).filter((item) => item.id !== note.id) }))}>Hapus</Button>
+            </div>
+          )) : <p className="rounded-xl bg-page p-3 text-sm text-muted">Belum ada catatan hari ini.</p>}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function ReminderRow(props: {
+  item: Reminder;
+  timeFormat: TimeFormat;
+  deleteReminder: (id: string) => void;
+  completeReminder: (id: string) => void;
+  snoozeReminder: (id: string, minutes: 5 | 10 | 15) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-line bg-page p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-bold">{props.item.title}</p>
+          <p className="text-sm text-muted">{formatDateTime(props.item.dateTime, props.timeFormat)}</p>
+          <p className="text-xs font-semibold text-muted">{props.item.status} - {repeatLabel(props.item.repeat)}</p>
+        </div>
+        <Button onClick={() => props.deleteReminder(props.item.id)}>Hapus</Button>
+      </div>
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        <Button variant="primary" onClick={() => props.completeReminder(props.item.id)}>Selesai</Button>
+        <Button onClick={() => props.snoozeReminder(props.item.id, 10)}>Tunda 10</Button>
+        <Button onClick={() => props.snoozeReminder(props.item.id, 15)}>Tunda 15</Button>
+      </div>
+    </div>
+  );
+}
+
+function RakaatTab(props: {
+  rakaat: { count: number; target: number };
+  setRakaat: React.Dispatch<React.SetStateAction<{ count: number; target: number }>>;
+  cameraStatus: CameraStatus;
+  cameraMessage: string;
+  startCamera: () => void;
+  stopCamera: () => void;
+  videoRef: React.RefObject<HTMLVideoElement>;
+}) {
+  return (
+    <>
+      <section className="card text-center">
+        <SectionTitle title="Hitung Rakaat Manual" subtitle="Gunakan tombol manual jika kamera/model belum tersedia." />
+        <p className="text-6xl font-black text-brand">{props.rakaat.count}/{props.rakaat.target}</p>
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          {[2, 3, 4].map((target) => (
+            <Button key={target} variant={props.rakaat.target === target ? "soft" : "secondary"} onClick={() => props.setRakaat((current) => ({ ...current, target }))}>
+              {target} rakaat
+            </Button>
+          ))}
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <Button variant="primary" onClick={() => props.setRakaat((current) => ({ ...current, count: clampNumber(current.count + 1, 0, current.target) }))}>Tambah</Button>
+          <Button onClick={() => props.setRakaat((current) => ({ ...current, count: clampNumber(current.count - 1, 0, current.target) }))}>Kurangi</Button>
+          <Button onClick={() => props.setRakaat((current) => ({ ...current, count: 0 }))}>Reset</Button>
+          <Button variant="soft" onClick={() => props.setRakaat((current) => ({ ...current, count: current.target }))}>Selesai Rakaat</Button>
+        </div>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Kamera Opsional" subtitle="Tidak ada deteksi pose palsu. Manual tetap fitur utama." />
+        <p className="rounded-xl bg-page p-3 text-sm font-semibold text-muted">{props.cameraMessage}</p>
+        <video ref={props.videoRef} className={`mt-3 w-full rounded-xl bg-slate-950 ${props.cameraStatus === "active" ? "block" : "hidden"}`} autoPlay playsInline muted />
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <Button variant="primary" onClick={props.startCamera}>Mulai Kamera</Button>
+          <Button onClick={props.stopCamera}>Stop Kamera</Button>
+        </div>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Panduan Rakaat" />
+        <p className="text-sm leading-6 text-muted">
+          Untuk hitung otomatis yang benar, rakaat tidak boleh dihitung dari sujud saja. Urutannya harus Berdiri, Rukuk, Sujud 1, Duduk, Sujud 2, lalu Berdiri lagi. Karena model AI belum tersedia stabil di semua browser, tombol manual selalu disediakan.
+        </p>
+      </section>
+    </>
+  );
+}
+
+function SettingsTab(props: {
+  notificationPermission: NotificationPermissionState;
+  requestNotificationPermission: () => void;
+  sendTestNotification: () => void;
+  scheduleOneMinuteTest: () => void;
+  testVoice: () => void;
+  lastTestResult: string;
+  lastVoiceResult: string;
+  schedulerStatus: string;
+  lastCheckAt: string | null;
+  schedulerRunCheck: () => void;
+  notifications: WebNotificationSettings;
+  setNotifications: React.Dispatch<React.SetStateAction<WebNotificationSettings>>;
+  voice: VoiceSettings;
+  setVoice: React.Dispatch<React.SetStateAction<VoiceSettings>>;
+  playBeep: () => void;
+  coords: Coordinates;
+  requestGps: () => void;
+  setManualCity: (city: string) => void;
+  method: number;
+  setMethod: React.Dispatch<React.SetStateAction<number>>;
+  theme: ThemeMode;
+  setTheme: React.Dispatch<React.SetStateAction<ThemeMode>>;
+  timeFormat: TimeFormat;
+  setTimeFormat: React.Dispatch<React.SetStateAction<TimeFormat>>;
+  dnd: DndSettings;
+  setDnd: React.Dispatch<React.SetStateAction<DndSettings>>;
+  quickActions: string[];
+  setQuickActions: React.Dispatch<React.SetStateAction<string[]>>;
+  safeMode: boolean;
+  setSafeMode: React.Dispatch<React.SetStateAction<boolean>>;
+  history: HistoryLog[];
+  setHistory: React.Dispatch<React.SetStateAction<HistoryLog[]>>;
+  importText: string;
+  setImportText: (value: string) => void;
+  exportSettings: () => void;
+  importSettings: () => void;
+  resetAllSettings: () => void;
+  installPrompt: BeforeInstallPromptEvent | null;
+  setInstallPrompt: React.Dispatch<React.SetStateAction<BeforeInstallPromptEvent | null>>;
+  addToast: (message: string, tone?: ToastTone) => void;
+  reminders: Reminder[];
+  setReminders: React.Dispatch<React.SetStateAction<Reminder[]>>;
+  setTracker: React.Dispatch<React.SetStateAction<PrayerTracker>>;
+  setCoords: React.Dispatch<React.SetStateAction<Coordinates>>;
+}) {
+  const setDndFor = (minutes: number) => props.setDnd({ enabled: true, until: new Date(Date.now() + minutes * 60_000).toISOString() });
+  return (
+    <>
+      <section className="card">
+        <SectionTitle title="Notification Test Center" subtitle="Tes ini memakai Browser Notification API asli jika izin granted." />
+        <div className="grid gap-2 text-sm">
+          <StatusItem label="Notification API" value={"Notification" in window ? "supported" : "unsupported"} />
+          <StatusItem label="Permission" value={props.notificationPermission} />
+          <StatusItem label="Global sholat" value={props.notifications.enabled ? "on" : "off"} />
+          <StatusItem label="Scheduler" value={props.schedulerStatus} />
+          <StatusItem label="Last check" value={props.lastCheckAt ? formatClock(new Date(props.lastCheckAt), props.timeFormat) : "-"} />
+          <StatusItem label="Tes terakhir" value={props.lastTestResult} />
+        </div>
+        {props.notificationPermission === "denied" ? <p className="mt-3 rounded-xl bg-rose-100 p-3 text-sm font-semibold text-rose-900">Izin notifikasi ditolak. Aktifkan dari pengaturan browser.</p> : null}
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <Button onClick={props.requestNotificationPermission}>Minta Izin Notifikasi</Button>
+          <Button onClick={props.sendTestNotification}>Kirim Notifikasi Tes</Button>
+          <Button onClick={props.scheduleOneMinuteTest}>Jadwalkan Tes 1 Menit Lagi</Button>
+          <Button onClick={props.schedulerRunCheck}>Reschedule/Cek Hari Ini</Button>
+          <Button onClick={() => props.setNotifications((current) => ({ ...current, enabled: false }))}>Matikan Semua Notifikasi</Button>
+        </div>
+        <p className="mt-3 text-sm text-muted">Notifikasi web bekerja paling baik saat aplikasi dibuka atau dipasang sebagai PWA. Untuk push saat browser benar-benar tertutup, dibutuhkan backend Web Push khusus.</p>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Voice AI dan Suara" subtitle="Klik Tes Suara AI sekali agar suara otomatis lebih stabil saat aplikasi terbuka." />
+        <div className="grid gap-2">
+          {[
+            ["Suara AI aktif", "enabled"],
+            ["Suara AI untuk adzan", "prayer"],
+            ["Suara AI untuk reminder", "reminder"],
+          ].map(([label, key]) => (
+            <label key={key} className="flex min-h-11 items-center justify-between gap-3">
+              <span className="font-semibold">{label}</span>
+              <input type="checkbox" checked={Boolean(props.voice[key as keyof VoiceSettings])} onChange={(event) => props.setVoice((current) => ({ ...current, [key]: event.target.checked }))} />
+            </label>
+          ))}
+          <select className="input" value={props.voice.rate} onChange={(event) => props.setVoice((current) => ({ ...current, rate: event.target.value as VoiceSettings["rate"] }))} aria-label="Kecepatan suara">
+            <option value="slow">Pelan</option>
+            <option value="normal">Normal</option>
+            <option value="fast">Cepat</option>
+          </select>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <Button onClick={props.testVoice}>Tes Suara AI</Button>
+          <Button onClick={props.playBeep}>Tes Beep Web</Button>
+        </div>
+        <p className="mt-2 text-sm text-muted">{props.lastVoiceResult}</p>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Permission Center" />
+        <PermissionRow label="Location / Geolocation" status={navigator.geolocation ? props.coords.source : "unsupported"} action={props.requestGps} help="Izin lokasi ditolak. Kamu tetap bisa pilih kota manual." />
+        <PermissionRow label="Notification" status={props.notificationPermission} action={props.requestNotificationPermission} help="Izin notifikasi ditolak. Aktifkan dari pengaturan browser." />
+        <PermissionRow label="Microphone / SpeechRecognition" status={"webkitSpeechRecognition" in window || "SpeechRecognition" in window ? "supported" : "unsupported"} action={() => props.addToast("Mikrofon belum tersedia. Kamu tetap bisa ketik atau pilih tombol cepat.", "info")} help="Izin mikrofon ditolak. Kamu tetap bisa ketik perintah." />
+        <PermissionRow label="Camera / getUserMedia" status={navigator.mediaDevices && "getUserMedia" in navigator.mediaDevices ? "supported" : "unsupported"} action={() => props.addToast("Cek kamera dari tab Rakaat.", "info")} help="Izin kamera ditolak. Hitung rakaat manual tetap bisa dipakai." />
+        <PermissionRow label="SpeechSynthesis" status={"speechSynthesis" in window ? "supported" : "unsupported"} action={props.testVoice} help="Browser ini belum mendukung fitur suara." />
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Lokasi, Jadwal, dan Tampilan" />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <FieldLabel>Kota manual</FieldLabel>
+            <select className="input" value={props.coords.city in cityOptions ? props.coords.city : "Jakarta"} onChange={(event) => props.setManualCity(event.target.value)}>
+              {Object.keys(cityOptions).map((city) => <option key={city}>{city}</option>)}
+            </select>
+          </div>
+          <div>
+            <FieldLabel>Metode sholat</FieldLabel>
+            <select className="input" value={props.method} onChange={(event) => props.setMethod(Number(event.target.value))}>
+              {methodOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <FieldLabel>Format waktu</FieldLabel>
+            <select className="input" value={props.timeFormat} onChange={(event) => props.setTimeFormat(event.target.value as TimeFormat)}>
+              <option value="24h">24 jam - 17:46</option>
+              <option value="12h">12 jam - 05:46 PM</option>
+            </select>
+          </div>
+          <div>
+            <FieldLabel>Tema</FieldLabel>
+            <select className="input" value={props.theme} onChange={(event) => props.setTheme(event.target.value as ThemeMode)}>
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </div>
+        </div>
+        <p className="mt-3 text-sm text-muted">Jika jadwal terasa berbeda, pilih metode perhitungan yang sesuai daerah kamu.</p>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Jangan Ganggu" subtitle={dndLabel(props.dnd, props.timeFormat)} />
+        <div className="grid grid-cols-2 gap-2">
+          <Button onClick={() => props.setDnd({ enabled: false, until: null })}>Off</Button>
+          <Button onClick={() => setDndFor(30)}>30 menit</Button>
+          <Button onClick={() => setDndFor(60)}>1 jam</Button>
+          <Button onClick={() => {
+            const until = new Date();
+            until.setDate(until.getDate() + 1);
+            until.setHours(5, 0, 0, 0);
+            props.setDnd({ enabled: true, until: until.toISOString() });
+          }}>Sampai besok</Button>
+        </div>
+        <label className="mt-3 flex min-h-11 items-center gap-2">
+          <input type="checkbox" checked={props.notifications.keepPrayerDuringDnd} onChange={(event) => props.setNotifications((current) => ({ ...current, keepPrayerDuringDnd: event.target.checked }))} />
+          Tetap ingatkan waktu sholat
+        </label>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Aksi Favorit" />
+        <div className="grid grid-cols-2 gap-2">
+          {defaultQuickActions.map((action) => (
+            <label key={action} className="flex min-h-11 items-center gap-2 rounded-xl border border-line px-3">
+              <input
+                type="checkbox"
+                checked={props.quickActions.includes(action)}
+                onChange={(event) =>
+                  props.setQuickActions((items) => (event.target.checked ? [...items, action] : items.filter((item) => item !== action)))
+                }
+              />
+              {action}
+            </label>
+          ))}
+        </div>
+        <Button className="mt-3" onClick={() => props.setQuickActions(defaultQuickActions)}>Reset Default</Button>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="PWA dan Privasi" />
+        {props.installPrompt ? (
+          <Button
+            variant="primary"
+            onClick={async () => {
+              await props.installPrompt?.prompt();
+              props.setInstallPrompt(null);
+            }}
+          >
+            Pasang WaktuAI
+          </Button>
+        ) : (
+          <p className="rounded-xl bg-page p-3 text-sm text-muted">Jika browser mendukung, opsi install akan muncul setelah WaktuAI memenuhi syarat PWA.</p>
+        )}
+        <p className="mt-3 text-sm text-muted">Data WaktuAI disimpan lokal di browser. Tidak ada akun, token perangkat, atau backend push di versi web statis ini.</p>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Backup dan Restore" />
+        <div className="grid grid-cols-2 gap-2">
+          <Button onClick={props.exportSettings}>Export / Copy</Button>
+          <Button onClick={props.importSettings}>Import JSON</Button>
+        </div>
+        <textarea className="input mt-3 min-h-28" value={props.importText} onChange={(event) => props.setImportText(event.target.value)} placeholder="Paste JSON backup di sini" aria-label="Import JSON settings" />
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Reset dan Safe Mode" />
+        <label className="flex min-h-11 items-center justify-between gap-3">
+          <span className="font-semibold">Safe mode</span>
+          <input
+            type="checkbox"
+            checked={props.safeMode}
+            onChange={(event) => {
+              props.setSafeMode(event.target.checked);
+              if (event.target.checked) {
+                props.setVoice((current) => ({ ...current, enabled: false }));
+                props.setNotifications((current) => ({ ...current, repeatMode: "off" }));
+              }
+            }}
+          />
+        </label>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <Button onClick={() => props.setHistory([])}>Reset Riwayat</Button>
+          <Button onClick={() => props.setReminders([])}>Reset Reminder</Button>
+          <Button onClick={() => props.setCoords({ lat: cityOptions.Jakarta.lat, lon: cityOptions.Jakarta.lon, city: "Jakarta", source: "Default Jakarta" })}>Reset Lokasi</Button>
+          <Button onClick={() => props.setTracker({})}>Reset Tracker</Button>
+          <Button className="col-span-2" onClick={props.resetAllSettings}>Reset Semua</Button>
+        </div>
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Riwayat Notifikasi" />
+        {props.history.length ? (
+          <div className="grid max-h-96 gap-2 overflow-auto">
+            {props.history.map((item) => (
+              <div key={item.id} className="rounded-xl border border-line bg-page p-3 text-sm">
+                <p className="font-bold">{item.title}</p>
+                <p className="text-muted">{item.type} - {item.status} - {formatDateTime(item.time, props.timeFormat)}</p>
+                {item.reason ? <p className="text-muted">{item.reason}</p> : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-xl bg-page p-3 text-sm text-muted">Belum ada riwayat.</p>
+        )}
+      </section>
+
+      <section className="card">
+        <SectionTitle title="Tentang" />
+        <p className="text-sm text-muted">WaktuAI 2.0.0 - Web / Vite / Vercel.</p>
+        <ul className="mt-3 list-inside list-disc text-sm text-muted">
+          <li>Added prayer notifications</li>
+          <li>Added exact reminders</li>
+          <li>Added qibla direction</li>
+          <li>Added rakaat manual counter</li>
+          <li>Added tasbih counter</li>
+        </ul>
+      </section>
+    </>
+  );
+}
+
+function PermissionRow({ label, status, action, help }: { label: string; status: string; action: () => void; help: string }) {
+  return (
+    <div className="mb-2 rounded-xl border border-line bg-page p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-bold">{label}</p>
+          <p className="text-sm text-muted">{status}</p>
+        </div>
+        <Button onClick={action}>{status === "unsupported" ? "Buka Bantuan" : "Minta Izin"}</Button>
+      </div>
+      {status === "denied" || status === "unsupported" ? <p className="mt-2 text-sm text-muted">{status === "unsupported" ? "Browser ini belum mendukung fitur ini." : help}</p> : null}
+    </div>
+  );
+}
+
+function CommandCenter({ runCommand }: { runCommand: (command: string) => void }) {
+  const [search, setSearch] = useState("");
+  const commands = [
+    ["Waktu", "Jam berapa sekarang?"],
+    ["Sholat", "Jadwal sholat hari ini"],
+    ["Sholat", "Isya jam berapa"],
+    ["Notifikasi", "Aktifkan notifikasi sholat"],
+    ["Notifikasi", "Tes notifikasi"],
+    ["Reminder", "Ingatkan aku 17:46"],
+    ["Reminder", "Alarm 04:30 setiap hari"],
+    ["Kiblat", "Arah kiblat"],
+    ["Rakaat", "Mulai deteksi rakaat"],
+    ["Rakaat", "Tambah rakaat"],
+    ["Tasbih", "Hitung tasbih"],
+    ["Bantuan", "Aku bingung"],
+  ];
+  const filtered = commands.filter(([category, text]) => `${category} ${text}`.toLowerCase().includes(search.toLowerCase()));
+  return (
+    <div className="mt-4">
+      <FieldLabel>Command Center</FieldLabel>
+      <input className="input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari: isya, reminder, kiblat, rakaat, tasbih" aria-label="Cari command" />
+      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {(filtered.length ? filtered : commands.slice(0, 5)).map(([category, text]) => (
+          <button key={`${category}-${text}`} className="min-h-14 rounded-xl border border-line bg-page p-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" onClick={() => runCommand(text)}>
+            <p className="text-xs font-bold uppercase text-brand">{category}</p>
+            <p className="font-semibold">{text}</p>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TroubleshootingCards(props: {
+  topic: string;
+  requestNotificationPermission: () => void;
+  testVoice: () => void;
+  sendTestNotification: () => void;
+  requestGps: () => void;
+  openTab: (tab: Tab) => void;
+}) {
+  const topic = props.topic;
+  const cards = topic.includes("notifikasi")
+    ? [
+        ["Cek izin", props.requestNotificationPermission],
+        ["Kirim tes", props.sendTestNotification],
+        ["Buka pengaturan", () => props.openTab("settings")],
+      ]
+    : topic.includes("suara")
+      ? [["Tes suara", props.testVoice], ["Buka voice settings", () => props.openTab("settings")]]
+      : topic.includes("kiblat")
+        ? [["Refresh GPS", props.requestGps], ["Buka kiblat", () => props.openTab("prayer")]]
+        : topic.includes("kamera")
+          ? [["Buka rakaat", () => props.openTab("rakaat")], ["Pakai manual", () => props.openTab("rakaat")]]
+          : [["Buka bantuan", () => props.openTab("home")], ["Buka pengaturan", () => props.openTab("settings")]];
+  return (
+    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+      {cards.map(([label, action]) => (
+        <Button key={label as string} onClick={action as () => void}>{label as string}</Button>
+      ))}
+    </div>
+  );
+}
+
+function BottomNav({ activeTab, setActiveTab }: { activeTab: Tab; setActiveTab: (tab: Tab) => void }) {
+  const items: Array<[Tab, string]> = [
+    ["home", "Beranda"],
+    ["prayer", "Sholat"],
+    ["reminder", "Reminder"],
+    ["rakaat", "Rakaat"],
+    ["settings", "Pengaturan"],
+  ];
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-line bg-panel/95 px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2 backdrop-blur md:sticky md:bottom-auto md:mx-auto md:mt-6 md:max-w-5xl md:rounded-2xl md:border">
+      <div className="mx-auto grid max-w-5xl grid-cols-5 gap-1">
+        {items.map(([tab, label]) => (
+          <button
+            key={tab}
+            className={`min-h-14 rounded-xl px-1 text-xs font-bold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand sm:text-sm ${activeTab === tab ? "bg-brand text-white dark:text-slate-950" : "text-muted"}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </nav>
+  );
+}
+
+function Onboarding(props: {
+  requestGps: () => void;
+  requestNotificationPermission: () => void;
+  testVoice: () => void;
+  finish: () => void;
+  skip: () => void;
+}) {
+  const [step, setStep] = useState(0);
+  const steps = [
+    {
+      title: "Selamat datang",
+      body: "WaktuAI bantu jadwal sholat, reminder, kiblat, dan rakaat.",
+      action: null,
+    },
+    {
+      title: "Lokasi",
+      body: "Pakai GPS untuk jadwal dan kiblat lebih sesuai. Kamu juga bisa pilih kota manual nanti.",
+      action: props.requestGps,
+    },
+    {
+      title: "Notifikasi",
+      body: "Aktifkan notifikasi sholat saat WaktuAI terbuka atau PWA aktif.",
+      action: props.requestNotificationPermission,
+    },
+    {
+      title: "Voice AI",
+      body: "Tes suara sekali supaya browser mengizinkan suara setelah interaksi.",
+      action: props.testVoice,
+    },
+    {
+      title: "Siap digunakan",
+      body: "Semua fitur utama punya fallback manual jika izin browser tidak tersedia.",
+      action: null,
+    },
+  ];
+  const current = steps[step];
+  return (
+    <div className="fixed inset-0 z-[60] grid place-items-end bg-slate-950/55 p-3 sm:place-items-center">
+      <div className="w-full max-w-md rounded-2xl bg-panel p-5 shadow-soft">
+        <p className="text-sm font-bold text-brand">Langkah {step + 1}/5</p>
+        <h2 className="mt-2 text-2xl font-black">{current.title}</h2>
+        <p className="mt-2 text-muted">{current.body}</p>
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <Button onClick={props.skip}>Lewati</Button>
+          {current.action ? <Button onClick={current.action}>Jalankan</Button> : null}
+          <Button variant="primary" className={current.action ? "col-span-2" : ""} onClick={step === steps.length - 1 ? props.finish : () => setStep((item) => item + 1)}>
+            {step === steps.length - 1 ? "Selesai" : "Lanjut"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

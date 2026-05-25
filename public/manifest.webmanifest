@@ -1,16 +1,15 @@
 {
   "name": "WaktuAI",
   "short_name": "WaktuAI",
-  "description": "Jadwal sholat, reminder, notifikasi, suara, kiblat, dan hitung rakaat.",
+  "description": "Jadwal sholat, reminder, kiblat, tasbih, dan rakaat untuk web.",
   "start_url": "/",
-  "scope": "/",
   "display": "standalone",
   "background_color": "#f8fafc",
   "theme_color": "#0f766e",
   "icons": [
     {
-      "src": "/icons/icon.svg",
-      "sizes": "any",
+      "src": "/icon.svg",
+      "sizes": "512x512",
       "type": "image/svg+xml",
       "purpose": "any maskable"
     }
